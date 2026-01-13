@@ -1,13 +1,22 @@
 #!/usr/bin/env python3
 """
-Sandbox runner script - executes inside Docker container.
+Sandbox runner - executes miner code inside isolated Docker container.
+
+SECURITY:
+- Runs untrusted miner code in isolated environment
+- No network access
+- Read-only filesystem
+- External time measurement (prevents timing manipulation)
+- Random seed per evaluation (prevents pre-computation)
 
 This script:
-1. Loads the benchmark config
-2. Imports and validates the miner's train.py
-3. Runs the miner's inner_steps function
-4. Captures output logits and loss for verification
+1. Loads official 8B model and dataset (same for all miners)
+2. Imports miner's train.py
+3. Runs miner's inner_steps function
+4. Captures outputs for verification
 5. Writes results to /output/result.json
+
+Model/Data: Specified in hparams.json (same for all participants)
 """
 
 import importlib.util
@@ -149,43 +158,71 @@ def main():
             torch.backends.cudnn.benchmark = False
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"Device: {device}")
+        sys.stdout.flush()
 
-        # Load model
+        # Load official model (HuggingFace format)
         print(f"Loading model from {model_path}...")
-        checkpoint = torch.load(model_path, map_location=device, weights_only=False)
-        if isinstance(checkpoint, torch.nn.Module):
-            model = checkpoint
-        elif isinstance(checkpoint, dict) and "model" in checkpoint:
-            model = checkpoint["model"]
-        else:
-            write_result(output_dir, 0, 0, False, f"Unknown model format at {model_path}")
+        sys.stdout.flush()
+        try:
+            from transformers import AutoModelForCausalLM
+            
+            model = AutoModelForCausalLM.from_pretrained(
+                model_path,
+                torch_dtype=torch.bfloat16,
+                device_map={"": device},  # Force to specific device
+                trust_remote_code=True,
+            )
+            model.train()
+            
+            # Enable gradient checkpointing (MUST match reference executor)
+            # This ensures identical computation between reference and sandbox
+            if hasattr(model, 'gradient_checkpointing_enable'):
+                model.gradient_checkpointing_enable()
+                print("✅ Gradient checkpointing enabled (matches reference)")
+            
+            model_device = next(model.parameters()).device
+            print(f"✅ Model loaded: {sum(p.numel() for p in model.parameters()):,} parameters on {model_device}")
+            sys.stdout.flush()
+        except Exception as e:
+            write_result(output_dir, 0, 0, False, f"Failed to load model: {e}")
             return 1
-
-        model = model.to(device)
-        model.train()
-        print(f"Model loaded: {sum(p.numel() for p in model.parameters()):,} parameters")
 
         # Load initial model state if provided (for verification)
         initial_state_path = sandbox_dir / "initial_state.pt"
         if initial_state_path.exists():
             print("Loading initial model state for verification...")
+            sys.stdout.flush()
             initial_state = torch.load(initial_state_path, map_location=device, weights_only=True)
             model.load_state_dict(initial_state)
+            print(f"✅ Initial state loaded ({len(initial_state)} parameters)")
+            sys.stdout.flush()
 
         # Create optimizer
+        print("Creating optimizer...")
+        sys.stdout.flush()
         optimizer = torch.optim.AdamW(
             model.parameters(),
             lr=1e-4,
             weight_decay=0.1,
             betas=(0.9, 0.95),
         )
+        print("✅ Optimizer created")
+        sys.stdout.flush()
 
         # Create data iterator
         print(f"Loading data from {data_path}...")
+        sys.stdout.flush()
         data_iterator = create_data_iterator(data_path, batch_size, sequence_length)
+        print("✅ Data iterator created")
+        sys.stdout.flush()
 
         # Run miner's inner_steps
-        print(f"Running inner_steps for {num_steps} steps...")
+        print(f"🏃 Running inner_steps for {num_steps} steps...")
+        print(f"   Model device: {next(model.parameters()).device}")
+        print(f"   Batch size: {batch_size}, Sequence length: {sequence_length}")
+        sys.stdout.flush()
+        
         result = train_module.inner_steps(
             model=model,
             data_iterator=data_iterator,
@@ -193,6 +230,9 @@ def main():
             num_steps=num_steps,
             device=device,
         )
+        
+        print("✅ inner_steps completed")
+        sys.stdout.flush()
 
         # Validate result
         if not isinstance(result, InnerStepsResult):

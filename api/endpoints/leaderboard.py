@@ -16,6 +16,12 @@ async def get_leaderboard(
     """Get the current leaderboard."""
     submissions = await db.get_leaderboard(limit=limit)
 
+    # Get evaluation counts for each submission
+    eval_counts = {}
+    for s in submissions:
+        evals = await db.get_evaluations(s.submission_id)
+        eval_counts[s.submission_id] = len(evals)
+    
     return [
         LeaderboardEntry(
             rank=i + 1,
@@ -23,7 +29,7 @@ async def get_leaderboard(
             miner_hotkey=s.miner_hotkey,
             miner_uid=s.miner_uid,
             final_score=s.final_score,
-            num_evaluations=len(s.evaluations) if hasattr(s, "evaluations") else 0,
+            num_evaluations=eval_counts.get(s.submission_id, 0),
             created_at=s.created_at,
         )
         for i, s in enumerate(submissions)

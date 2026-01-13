@@ -1,0 +1,636 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Templar Competition - Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #333;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        
+        header {
+            text-align: center;
+            color: white;
+            margin-bottom: 40px;
+        }
+        
+        h1 {
+            font-size: 3em;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+        
+        .subtitle {
+            font-size: 1.2em;
+            opacity: 0.9;
+        }
+        
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 40px;
+        }
+        
+        .stat-card {
+            background: white;
+            border-radius: 12px;
+            padding: 24px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            transition: transform 0.2s;
+        }
+        
+        .stat-card:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 8px 12px rgba(0,0,0,0.15);
+        }
+        
+        .stat-label {
+            font-size: 0.9em;
+            color: #666;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 8px;
+        }
+        
+        .stat-value {
+            font-size: 2.5em;
+            font-weight: bold;
+            color: #667eea;
+        }
+        
+        .stat-change {
+            font-size: 0.9em;
+            margin-top: 8px;
+        }
+        
+        .positive { color: #10b981; }
+        .negative { color: #ef4444; }
+        
+        .section {
+            background: white;
+            border-radius: 12px;
+            padding: 24px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        
+        .section-title {
+            font-size: 1.5em;
+            margin-bottom: 20px;
+            color: #667eea;
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        
+        th {
+            background: #f3f4f6;
+            padding: 12px;
+            text-align: left;
+            font-weight: 600;
+            color: #374151;
+            border-bottom: 2px solid #e5e7eb;
+        }
+        
+        td {
+            padding: 12px;
+            border-bottom: 1px solid #e5e7eb;
+        }
+        
+        tr:hover {
+            background: #f9fafb;
+        }
+        
+        .rank {
+            font-weight: bold;
+            color: #667eea;
+        }
+        
+        .rank-1 { color: #fbbf24; }
+        .rank-2 { color: #9ca3af; }
+        .rank-3 { color: #cd7f32; }
+        
+        .score {
+            font-weight: 600;
+            color: #10b981;
+        }
+        
+        .status-badge {
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 0.85em;
+            font-weight: 600;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+        
+        .status-badge::before {
+            content: '';
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+        
+        /* Pending - Yellow/Orange */
+        .status-pending { 
+            background: #fef3c7; 
+            color: #92400e; 
+        }
+        .status-pending::before { 
+            background: #f59e0b;
+            animation: pulse 2s infinite;
+        }
+        
+        /* Validating - Light Blue */
+        .status-validating { 
+            background: #dbeafe; 
+            color: #1e40af; 
+        }
+        .status-validating::before { 
+            background: #3b82f6;
+            animation: pulse 1.5s infinite;
+        }
+        
+        /* Evaluating - Purple/Indigo */
+        .status-evaluating { 
+            background: #e0e7ff; 
+            color: #4338ca; 
+        }
+        .status-evaluating::before { 
+            background: #6366f1;
+            animation: pulse 1s infinite;
+        }
+        
+        /* Finished - Green */
+        .status-finished { 
+            background: #d1fae5; 
+            color: #065f46; 
+        }
+        .status-finished::before { 
+            background: #10b981;
+        }
+        
+        /* Failed Validation - Red */
+        .status-failed_validation { 
+            background: #fee2e2; 
+            color: #991b1b; 
+        }
+        .status-failed_validation::before { 
+            background: #ef4444;
+        }
+        
+        /* Error - Dark Red */
+        .status-error { 
+            background: #fecaca; 
+            color: #7f1d1d; 
+        }
+        .status-error::before { 
+            background: #dc2626;
+        }
+        
+        /* Running (for validator) */
+        .status-running { 
+            background: #dbeafe; 
+            color: #1e40af; 
+        }
+        .status-running::before { 
+            background: #3b82f6;
+            animation: pulse 1s infinite;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #666;
+        }
+        
+        .error {
+            background: #fee2e2;
+            color: #991b1b;
+            padding: 16px;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+        
+        .validator-card {
+            background: white;
+            border-radius: 12px;
+            padding: 24px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        
+        .validator-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 20px;
+            padding-bottom: 16px;
+            border-bottom: 2px solid #f0f0f0;
+        }
+        
+        .status-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }
+        
+        .status-dot.running {
+            background: #10b981;
+            box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.2);
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.6; }
+        }
+        
+        .validator-name {
+            font-size: 1.2em;
+            font-weight: 600;
+            color: #333;
+        }
+        
+        .validator-stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+        }
+        
+        .validator-stat {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px;
+            background: #f9fafb;
+            border-radius: 8px;
+        }
+        
+        .vstat-label {
+            color: #666;
+            font-size: 0.9em;
+        }
+        
+        .vstat-value {
+            color: #333;
+            font-weight: 600;
+            font-size: 1.1em;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>⚡ Templar Competition</h1>
+        </header>
+        
+        <!-- Network Overview Stats -->
+        <div class="stats-grid" id="stats-grid">
+            <div class="stat-card">
+                <div class="stat-label">Submissions (24h)</div>
+                <div class="stat-value" id="submissions-24h">-</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Current Top TPS</div>
+                <div class="stat-value" id="top-score">-</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Improvement (24h)</div>
+                <div class="stat-value" id="improvement">-</div>
+                <div class="stat-change" id="improvement-change"></div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Active Miners</div>
+                <div class="stat-value" id="active-miners">-</div>
+            </div>
+        </div>
+        
+        <!-- Validator Status -->
+        <div class="section">
+            <h2 class="section-title">⚡ Validator Status</h2>
+            <div class="validator-card">
+                <div class="validator-header">
+                    <span class="status-dot running" id="validator-dot"></span>
+                    <span class="validator-name">Primary Validator</span>
+                    <span class="status-badge status-running" id="validator-status">Running</span>
+                </div>
+                <div class="validator-stats">
+                    <div class="validator-stat">
+                        <span class="vstat-label">Evaluations (1h):</span>
+                        <span class="vstat-value" id="validator-evals">-</span>
+                    </div>
+                    <div class="validator-stat">
+                        <span class="vstat-label">Current Task:</span>
+                        <span class="vstat-value" id="validator-current">Checking for submissions...</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- TPS History Chart -->
+        <div class="section">
+            <h2 class="section-title">📊 TPS Performance History</h2>
+            <div style="background: white; padding: 20px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); height: 400px;">
+                <canvas id="tps-chart"></canvas>
+            </div>
+        </div>
+        
+        <!-- Top Submissions Leaderboard -->
+        <div class="section">
+            <h2 class="section-title">🏆 Top Submissions</h2>
+            <table id="leaderboard-table">
+                <thead>
+                    <tr>
+                        <th>Rank</th>
+                        <th>Miner UID</th>
+                        <th>TPS Score</th>
+                        <th>Evaluations</th>
+                        <th>Submitted</th>
+                    </tr>
+                </thead>
+                <tbody id="leaderboard-body">
+                    <tr><td colspan="5" class="loading">Loading...</td></tr>
+                </tbody>
+            </table>
+        </div>
+        
+        <!-- Recent Activity -->
+        <div class="section">
+            <h2 class="section-title">📋 Recent Submissions</h2>
+            <table id="recent-table">
+                <thead>
+                    <tr>
+                        <th>Miner UID</th>
+                        <th>Status</th>
+                        <th>TPS Score</th>
+                        <th>Submitted</th>
+                    </tr>
+                </thead>
+                <tbody id="recent-body">
+                    <tr><td colspan="4" class="loading">Loading...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+    
+    <script>
+        const API_BASE = '';  // Same origin
+        
+        async function loadData() {
+            try {
+                // Load overview stats
+                const overview = await fetch(`${API_BASE}/api/stats/overview`).then(r => r.json());
+                document.getElementById('submissions-24h').textContent = overview.submissions_24h;
+                document.getElementById('top-score').textContent = overview.current_top_score.toLocaleString();
+                document.getElementById('active-miners').textContent = overview.active_miners;
+                
+                const improvement = overview.score_improvement_24h;
+                const improvementEl = document.getElementById('improvement');
+                const changeEl = document.getElementById('improvement-change');
+                improvementEl.textContent = improvement.toFixed(1) + '%';
+                changeEl.textContent = improvement >= 0 ? '↑ Improved' : '↓ Decreased';
+                changeEl.className = 'stat-change ' + (improvement >= 0 ? 'positive' : 'negative');
+                
+                // Load validator status
+                loadValidatorStatus();
+                
+                // Load TPS history chart
+                loadTPSChart();
+                
+                // Load leaderboard
+                const leaderboard = await fetch(`${API_BASE}/leaderboard?limit=50`).then(r => r.json());
+                const leaderboardBody = document.getElementById('leaderboard-body');
+                
+                if (leaderboard.length === 0) {
+                    leaderboardBody.innerHTML = '<tr><td colspan="5" class="loading">No submissions yet</td></tr>';
+                } else {
+                    leaderboardBody.innerHTML = leaderboard.map(entry => `
+                        <tr style="cursor: pointer;" onclick="window.location.href='/submission.html?id=${entry.submission_id}'">
+                            <td class="rank rank-${entry.rank <= 3 ? entry.rank : ''}">#${entry.rank}</td>
+                            <td>${entry.miner_uid}</td>
+                            <td class="score">${entry.final_score.toLocaleString()}</td>
+                            <td>${entry.num_evaluations}</td>
+                            <td>${new Date(entry.created_at).toLocaleString()}</td>
+                        </tr>
+                    `).join('');
+                }
+                
+                // Load recent submissions
+                const recent = await fetch(`${API_BASE}/api/stats/recent?limit=20`).then(r => r.json());
+                const recentBody = document.getElementById('recent-body');
+                
+                if (recent.length === 0) {
+                    recentBody.innerHTML = '<tr><td colspan="4" class="loading">No recent submissions</td></tr>';
+                } else {
+                    // Format status text properly
+                    const formatStatus = (status) => {
+                        const statusMap = {
+                            'pending': 'Pending',
+                            'validating': 'Validating',
+                            'evaluating': 'Evaluating',
+                            'finished': 'Finished',
+                            'failed_validation': 'Failed',
+                            'error': 'Error'
+                        };
+                        return statusMap[status] || status;
+                    };
+                    
+                    recentBody.innerHTML = recent.map(sub => `
+                        <tr style="cursor: pointer;" onclick="window.location.href='/submission.html?id=${sub.submission_id}'">
+                            <td>${sub.miner_uid}</td>
+                            <td><span class="status-badge status-${sub.status}">${formatStatus(sub.status)}</span></td>
+                            <td class="score">${sub.final_score ? sub.final_score.toLocaleString() : '-'}</td>
+                            <td>${new Date(sub.created_at).toLocaleString()}</td>
+                        </tr>
+                    `).join('');
+                }
+                
+            } catch (error) {
+                console.error('Error loading data:', error);
+                document.body.innerHTML += `
+                    <div class="error">
+                        Failed to load data. Make sure the API server is running.
+                        <br>Error: ${error.message}
+                    </div>
+                `;
+            }
+        }
+        
+        // Load data on page load
+        loadData();
+        
+        // Load validator status
+        async function loadValidatorStatus() {
+            try {
+                const status = await fetch(`${API_BASE}/api/stats/validator`).then(r => r.json());
+                document.getElementById('validator-evals').textContent = status.evaluations_completed_1h;
+                
+                if (status.current_evaluation && status.current_evaluation.submission_id) {
+                    document.getElementById('validator-current').textContent = 
+                        `Evaluating Miner ${status.current_evaluation.miner_uid}`;
+                } else {
+                    document.getElementById('validator-current').textContent = 'Idle - Checking for submissions';
+                }
+            } catch (error) {
+                console.error('Failed to load validator status:', error);
+            }
+        }
+        
+        // Load and draw TPS history chart with Chart.js
+        let tpsChart = null;
+        
+        async function loadTPSChart() {
+            try {
+                const history = await fetch(`${API_BASE}/api/stats/history?limit=20`).then(r => r.json());
+                
+                if (!history || history.length === 0) {
+                    document.getElementById('tps-chart').parentElement.innerHTML = 
+                        '<p style="text-align: center; color: #999; padding: 40px;">No data yet. Submit your first code to see TPS history!</p>';
+                    return;
+                }
+                
+                const canvas = document.getElementById('tps-chart');
+                const ctx = canvas.getContext('2d');
+                
+                // Destroy existing chart if any
+                if (tpsChart) {
+                    tpsChart.destroy();
+                }
+                
+                // Prepare data
+                const labels = history.map((h, i) => `#${i + 1}`);
+                const tpsData = history.map(h => h.tps);
+                const minerData = history.map(h => `Miner ${h.miner_uid}`);
+                const timestamps = history.map(h => new Date(h.timestamp).toLocaleString());
+                
+                // Create chart
+                tpsChart = new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        labels: labels,
+                        datasets: [{
+                            label: 'TPS (Tokens Per Second)',
+                            data: tpsData,
+                            borderColor: '#667eea',
+                            backgroundColor: 'rgba(102, 126, 234, 0.1)',
+                            borderWidth: 3,
+                            fill: true,
+                            tension: 0.4,
+                            pointRadius: 6,
+                            pointHoverRadius: 8,
+                            pointBackgroundColor: '#667eea',
+                            pointBorderColor: '#fff',
+                            pointBorderWidth: 2,
+                            pointHoverBackgroundColor: '#fff',
+                            pointHoverBorderColor: '#667eea',
+                            pointHoverBorderWidth: 3,
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        interaction: {
+                            intersect: false,
+                            mode: 'index',
+                        },
+                        plugins: {
+                            legend: {
+                                display: true,
+                                position: 'top',
+                                labels: {
+                                    font: { size: 14, weight: 'bold' },
+                                    color: '#333'
+                                }
+                            },
+                            tooltip: {
+                                backgroundColor: 'rgba(0, 0, 0, 0.8)',
+                                padding: 12,
+                                titleFont: { size: 14, weight: 'bold' },
+                                bodyFont: { size: 13 },
+                                callbacks: {
+                                    title: function(context) {
+                                        return minerData[context[0].dataIndex];
+                                    },
+                                    label: function(context) {
+                                        return `TPS: ${context.parsed.y.toFixed(2)}`;
+                                    },
+                                    afterLabel: function(context) {
+                                        return `Submitted: ${timestamps[context.dataIndex]}`;
+                                    }
+                                }
+                            }
+                        },
+                        scales: {
+                            y: {
+                                beginAtZero: false,
+                                title: {
+                                    display: true,
+                                    text: 'TPS (Tokens Per Second)',
+                                    font: { size: 14, weight: 'bold' },
+                                    color: '#666'
+                                },
+                                ticks: {
+                                    callback: function(value) {
+                                        return value.toFixed(0);
+                                    },
+                                    font: { size: 12 },
+                                    color: '#666'
+                                },
+                                grid: {
+                                    color: 'rgba(0, 0, 0, 0.05)'
+                                }
+                            },
+                            x: {
+                                title: {
+                                    display: true,
+                                    text: 'Submission Rank (Chronological)',
+                                    font: { size: 14, weight: 'bold' },
+                                    color: '#666'
+                                },
+                                ticks: {
+                                    font: { size: 12 },
+                                    color: '#666'
+                                },
+                                grid: {
+                                    display: false
+                                }
+                            }
+                        }
+                    }
+                });
+                
+            } catch (error) {
+                console.error('Failed to load TPS chart:', error);
+            }
+        }
+        
+        // Auto-refresh every 30 seconds
+        setInterval(loadData, 30000);
+    </script>
+</body>
+</html>
+
+
+

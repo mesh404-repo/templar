@@ -85,13 +85,20 @@ class BaseNode(ABC):
         logger.info(f"Hotkey: {self.hotkey}")
 
         # Initial sync
-        await self.sync()
+        # Skip blockchain checks if in test mode
+        skip_check = getattr(self, 'skip_blockchain_check', False)
+        
+        if not skip_check:
+            await self.sync()
 
-        if self.uid is None:
-            logger.error(f"Hotkey {self.hotkey} not registered on subnet {self.hparams.netuid}")
-            return
+            if self.uid is None:
+                logger.error(f"Hotkey {self.hotkey} not registered on subnet {self.hparams.netuid}")
+                return
 
-        logger.info(f"UID: {self.uid}")
+            logger.info(f"UID: {self.uid}")
+        else:
+            logger.warning("Skipping blockchain registration check (test mode)")
+            logger.info(f"Hotkey: {self.hotkey}")
 
         self.running = True
 

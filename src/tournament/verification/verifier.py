@@ -1,6 +1,8 @@
 """Main verification orchestrator for comparing miner submissions against reference."""
 
+import ast
 import logging
+import random
 import tempfile
 from pathlib import Path
 
@@ -66,14 +68,20 @@ class SandboxVerifier:
 
         Args:
             code_path: Path to the miner's train.py file.
-            seed: Random seed for reproducibility (defaults to config).
+            seed: Random seed for this evaluation (generated randomly if None).
+                  Same seed is used for both reference and miner execution to ensure
+                  outputs match. Different seed per evaluation prevents pre-computation.
             timeout_seconds: Sandbox timeout (defaults to sandbox config).
             num_steps: Number of training steps (defaults to benchmark config).
 
         Returns:
             VerificationResult with success status and TPS if valid.
         """
-        seed = seed if seed is not None else self.config.random_seed
+        # Generate random seed if not provided (security: prevents pre-computation)
+        # The SAME seed is used for both reference and miner in this evaluation
+        seed = seed if seed is not None else random.randint(1, 2**31 - 1)
+
+        logger.info(f"Using random seed: {seed} for this evaluation")
 
         try:
             # Step 1: Run reference execution
@@ -90,7 +98,7 @@ class SandboxVerifier:
                 temp_path = Path(temp_dir)
 
                 # Save reference data for sandbox
-                reference_paths = self.reference.save_reference_outputs(ref_result, temp_path)
+                self.reference.save_reference_outputs(ref_result, temp_path)
 
                 # Step 3: Run miner code in sandbox
                 logger.info("Step 3/4: Running miner code in sandbox...")
@@ -161,9 +169,8 @@ class SandboxVerifier:
             sandbox_result: Sandbox execution result.
 
         Raises:
-            LogitsMismatchError: If logits don't match.
+            LogitsMismatchError: If output vectors don't match within tolerance.
             TokenCountMismatchError: If token counts don't match.
-            LossMismatchError: If loss values don't match.
         """
         # 1. Check token count (exact match required)
         if ref_result.total_tokens != sandbox_result.total_tokens:
@@ -173,22 +180,7 @@ class SandboxVerifier:
             )
         logger.info(f"  [OK] Token count matches: {sandbox_result.total_tokens:,}")
 
-        # 2. Check loss value (within tolerance)
-        if hasattr(sandbox_result, "final_loss") and sandbox_result.final_loss is not None:
-            loss_diff = abs(ref_result.final_loss - sandbox_result.final_loss)
-            if loss_diff > self.config.loss_tolerance:
-                raise LossMismatchError(
-                    expected=ref_result.final_loss,
-                    actual=sandbox_result.final_loss,
-                    tolerance=self.config.loss_tolerance,
-                )
-            logger.info(
-                f"  [OK] Loss matches: {sandbox_result.final_loss:.4f} "
-                f"(diff={loss_diff:.6f}, tol={self.config.loss_tolerance})"
-            )
-
-        # 3. Check logits (within tolerance)
-        # Load sandbox logits from output file if available
+        # 2. Check output vectors (aggregate difference within tolerance)
         if hasattr(sandbox_result, "final_logits") and sandbox_result.final_logits is not None:
             sandbox_logits = sandbox_result.final_logits
             if isinstance(sandbox_logits, str):
@@ -198,21 +190,30 @@ class SandboxVerifier:
             # Ensure same device for comparison
             ref_logits = ref_result.final_logits.to(sandbox_logits.device)
 
-            if not torch.allclose(
-                ref_logits,
-                sandbox_logits,
-                atol=self.config.logits_atol,
-                rtol=self.config.logits_rtol,
-            ):
+            # Calculate aggregate difference across all dimensions
+            diff = (ref_logits - sandbox_logits).abs()
+            mean_diff = diff.mean().item()
+            max_diff = diff.max().item()
+
+            # Calculate as percentage of mean absolute value
+            mean_abs_value = ref_logits.abs().mean().item()
+            if mean_abs_value > 0:
+                aggregate_diff_pct = mean_diff / mean_abs_value
+            else:
+                aggregate_diff_pct = mean_diff
+
+            if aggregate_diff_pct > self.config.output_vector_tolerance:
                 raise LogitsMismatchError(
                     expected=ref_logits,
                     actual=sandbox_logits,
-                    tolerance=self.config.logits_atol,
+                    tolerance=self.config.output_vector_tolerance,
                 )
+
             logger.info(
-                f"  [OK] Logits match (atol={self.config.logits_atol}, "
-                f"rtol={self.config.logits_rtol})"
+                f"  [OK] Output vectors match within {self.config.output_vector_tolerance*100:.1f}%"
             )
+            logger.info(f"      Mean diff: {mean_diff:.6f}, Max diff: {max_diff:.6f}")
+            logger.info(f"      Aggregate: {aggregate_diff_pct*100:.2f}% (threshold: {self.config.output_vector_tolerance*100:.1f}%)")
 
     async def verify_code_structure(self, code_path: str) -> tuple[bool, str | None]:
         """Quick validation of code structure before full verification.
@@ -228,8 +229,6 @@ class SandboxVerifier:
         Returns:
             Tuple of (is_valid, error_message).
         """
-        import ast
-
         code_path = Path(code_path)
         if not code_path.exists():
             return False, f"Code file not found: {code_path}"

@@ -1,6 +1,8 @@
 """Reference executor for running canonical inner_steps implementation."""
 
+import gc
 import logging
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,6 +10,7 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 from torch import nn
+from transformers import AutoModelForCausalLM
 
 from ..schemas import BenchmarkConfig
 
@@ -44,12 +47,26 @@ class ReferenceExecutor:
             model_path: Path to the benchmark model checkpoint.
             data_path: Path to the benchmark dataset.
             config: Benchmark configuration (batch size, seq len, num steps).
-            device: Device to run on (defaults to cuda if available).
+            device: Device to run on (defaults to CPU to save GPU memory).
         """
         self.model_path = Path(model_path)
         self.data_path = Path(data_path)
         self.config = config
-        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        # Use GPU 0 for reference execution (dedicated)
+        # Sandbox uses GPU 1-7 (round-robin) - no conflicts!
+        if device is None:
+            self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        else:
+            self.device = device
+        
+        # Cache for loaded model (load once, reuse for all evaluations)
+        self._model_cache: nn.Module | None = None
+        # CRITICAL: Store original weights to reset before each evaluation
+        # Without this, subsequent evaluations start from modified weights!
+        self._original_state: dict[str, torch.Tensor] | None = None
+        
+        logger.info(f"Reference executor will use device: {self.device}")
 
     def _set_deterministic_mode(self, seed: int) -> None:
         """Set deterministic mode for reproducibility."""
@@ -60,30 +77,67 @@ class ReferenceExecutor:
         torch.backends.cudnn.benchmark = False
 
     def _load_model(self) -> nn.Module:
-        """Load the benchmark model.
+        """Load the official 7B benchmark model.
+        
+        Uses caching: loads once, then reuses for all evaluations.
+        CRITICAL: Also saves original weights to reset before each evaluation.
+        This ensures each evaluation starts from the same initial state.
 
         Returns:
-            Loaded model on the target device.
+            Loaded model on the target device in train mode.
         """
-        # For now, we'll assume model is saved as a state dict
-        # In practice, this would load from the actual model checkpoint
+        # Return cached model if available
+        if self._model_cache is not None:
+            logger.info(f"Using cached reference model ({sum(p.numel() for p in self._model_cache.parameters()):,} parameters)")
+            # CRITICAL: Reset model to original state before each evaluation!
+            # Without this, evaluations would start from modified weights.
+            if self._original_state is not None:
+                logger.info("Resetting model to original weights...")
+                self._model_cache.load_state_dict(self._original_state)
+            return self._model_cache
+        
         if not self.model_path.exists():
-            raise FileNotFoundError(f"Model not found at {self.model_path}")
+            raise FileNotFoundError(
+                f"Model not found at {self.model_path}\n"
+                f"Run: uv run python scripts/setup_validator.py"
+            )
 
-        # Load model architecture and weights
-        # This is a placeholder - actual implementation depends on model format
-        checkpoint = torch.load(self.model_path, map_location=self.device, weights_only=False)
-
-        if isinstance(checkpoint, nn.Module):
-            model = checkpoint
-        elif isinstance(checkpoint, dict) and "model" in checkpoint:
-            model = checkpoint["model"]
-        else:
-            raise ValueError(f"Unknown checkpoint format at {self.model_path}")
-
-        model = model.to(self.device)
-        model.train()
-        return model
+        try:
+            # Load model on GPU 0 (dedicated for reference)
+            logger.info(f"Loading model from {self.model_path} on {self.device} (first time)")
+            device_map = {"": 0} if self.device.type == "cuda" else "cpu"
+            model = AutoModelForCausalLM.from_pretrained(
+                self.model_path,
+                dtype=torch.bfloat16,
+                device_map=device_map,  # Pin to GPU 0
+                trust_remote_code=True,
+            )
+            
+            model.train()
+            
+            # Enable gradient checkpointing to reduce memory
+            if hasattr(model, 'gradient_checkpointing_enable'):
+                model.gradient_checkpointing_enable()
+                logger.info("Gradient checkpointing enabled")
+            
+            num_params = sum(p.numel() for p in model.parameters())
+            logger.info(f"Model loaded and cached: {num_params:,} parameters")
+            
+            # CRITICAL: Save original state for resetting between evaluations
+            # This ensures each evaluation starts from the exact same weights
+            logger.info("Saving original model state for reset between evaluations...")
+            self._original_state = {k: v.clone() for k, v in model.state_dict().items()}
+            logger.info(f"Original state saved ({len(self._original_state)} parameters)")
+            
+            # Cache for future evaluations
+            self._model_cache = model
+            
+            return model
+            
+        except ImportError:
+            raise ImportError("transformers library required. Run: uv sync")
+        except Exception as e:
+            raise ValueError(f"Failed to load model from {self.model_path}: {e}")
 
     def _create_optimizer(self, model: nn.Module) -> torch.optim.Optimizer:
         """Create optimizer for reference execution.
@@ -195,9 +249,10 @@ class ReferenceExecutor:
         final_logits = None
         final_loss = None
 
-        logger.info(f"Running {self.config.num_steps} training steps...")
+        logger.info(f"🏃 Running {self.config.num_steps} training steps...")
 
         for step in range(self.config.num_steps):
+            step_start = time.time()
             batch = next(data_iter)
             batch = batch.to(self.device, dtype=torch.long)
 
@@ -207,12 +262,15 @@ class ReferenceExecutor:
                 input_ids = batch[:, :-1]
                 labels = batch[:, 1:]
 
-                logits = model(input_ids)
+                outputs = model(input_ids)
+                # Handle HuggingFace models that return objects
+                logits = outputs.logits if hasattr(outputs, 'logits') else outputs
 
                 # Cross entropy loss
+                # Use reshape instead of view to handle non-contiguous tensors
                 loss = F.cross_entropy(
-                    logits.view(-1, logits.size(-1)),
-                    labels.view(-1),
+                    logits.reshape(-1, logits.size(-1)),
+                    labels.reshape(-1),
                     ignore_index=-100,
                 )
 
@@ -223,6 +281,8 @@ class ReferenceExecutor:
 
             # Track metrics
             total_tokens += batch.numel()
+            step_time = time.time() - step_start
+            logger.info(f"  Step {step+1}/{self.config.num_steps}: loss={loss.item():.4f}, tokens={batch.numel():,}, time={step_time:.2f}s")
             final_logits = logits.detach().float()  # Convert back to fp32 for comparison
             final_loss = loss.item()
 
@@ -234,6 +294,9 @@ class ReferenceExecutor:
             torch.cuda.synchronize()
 
         logger.info(f"Reference execution complete: {total_tokens} tokens, loss={final_loss:.4f}")
+        
+        # Memory cleanup to prevent OOM in long-running validators
+        self._cleanup_memory()
 
         return ReferenceResult(
             final_logits=final_logits,
@@ -241,6 +304,24 @@ class ReferenceExecutor:
             final_loss=final_loss,
             initial_state=initial_state,
         )
+    
+    def _cleanup_memory(self):
+        """Clean up GPU memory after evaluation to prevent OOM.
+        
+        This is critical for long-running validators that evaluate many submissions.
+        Without this, memory fragments accumulate and eventually cause OOM errors.
+        """
+        if torch.cuda.is_available():
+            # Clear PyTorch's memory cache
+            torch.cuda.empty_cache()
+            
+            # Run Python garbage collection
+            gc.collect()
+            
+            # Log memory status
+            allocated = torch.cuda.memory_allocated() / 1e9
+            reserved = torch.cuda.memory_reserved() / 1e9
+            logger.debug(f"GPU memory after cleanup: {allocated:.2f}GB allocated, {reserved:.2f}GB reserved")
 
     def save_reference_outputs(
         self,

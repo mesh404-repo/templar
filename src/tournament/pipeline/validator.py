@@ -17,11 +17,11 @@ class CodeValidator:
 
     Checks:
     1. Syntax validity (can be parsed)
-    2. Required functions exist (setup_model, setup_data, train_step)
+    2. Required function exists (inner_steps)
     3. No forbidden imports (optional, configurable)
     """
 
-    REQUIRED_FUNCTIONS = {"setup_model", "setup_data", "train_step"}
+    REQUIRED_FUNCTIONS = {"inner_steps"}
 
     # Imports that are explicitly forbidden (security risk)
     FORBIDDEN_IMPORTS = {

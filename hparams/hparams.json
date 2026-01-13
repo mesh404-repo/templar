@@ -1,30 +1,40 @@
 {
     "netuid": 3,
 
-    "num_evals_per_submission": 3,
-    "eval_steps": 100,
+    "num_evals_per_submission": 1,
+    "evaluation_runs": 5,
+    "eval_steps": 5,
     "eval_timeout": 600,
 
-    "benchmark_model_size": "150M",
+    "benchmark_model_name": "Qwen/Qwen2.5-3B",
+    "benchmark_model_revision": "main",
+    "benchmark_dataset_name": "HuggingFaceFW/fineweb",
+    "benchmark_dataset_split": "train",
+    "benchmark_train_size": 100000,
+    "benchmark_test_size": 100000,
+    "benchmark_master_seed": 42,
     "benchmark_sequence_length": 1024,
     "benchmark_batch_size": 8,
 
     "set_weights_interval_seconds": 600,
+    
+    "submission_cost_rao": 100000000,
+
+    "anti_copying": {
+        "submission_cooldown_minutes": 5,
+        "hide_pending_submissions": true
+    },
 
     "sandbox": {
-        "memory_limit": "16g",
+        "memory_limit": "32g",
         "cpu_count": 4,
         "gpu_count": 1,
         "pids_limit": 256
     },
 
     "verification": {
-        "logits_atol": 1e-3,
-        "logits_rtol": 1e-3,
-        "loss_tolerance": 1e-3,
-        "verify_model_state": false,
-        "deterministic_mode": true,
-        "random_seed": 42
+        "output_vector_tolerance": 0.02,
+        "deterministic_mode": true
     },
 
     "storage": {

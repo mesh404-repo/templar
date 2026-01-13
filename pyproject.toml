@@ -35,6 +35,8 @@ dependencies = [
     "boto3>=1.34.0",
     "torch>=2.0.0",
     "transformers>=4.36.0",
+    "accelerate>=0.20.0",
+    "datasets>=2.14.0",
 ]
 
 [project.optional-dependencies]
@@ -52,10 +54,11 @@ tournament-screener = "neurons.screener:main"
 tournament-miner = "neurons.miner:main"
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["src", "."]
+include = ["tournament*", "neurons*"]
 
 [tool.setuptools.package-dir]
-"" = "src"
+tournament = "src/tournament"
 
 [tool.ruff]
 line-length = 100

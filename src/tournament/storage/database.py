@@ -74,6 +74,14 @@ class Database:
                 submission.status = SubmissionStatus.FINISHED
                 await session.commit()
 
+    async def get_all_submissions(self) -> list[SubmissionModel]:
+        """Get all submissions."""
+        async with self.session_factory() as session:
+            result = await session.execute(
+                select(SubmissionModel).order_by(desc(SubmissionModel.created_at))
+            )
+            return list(result.scalars().all())
+
     async def get_pending_submissions(self) -> list[SubmissionModel]:
         """Get submissions pending validation."""
         async with self.session_factory() as session:
@@ -120,7 +128,7 @@ class Database:
                 .select_from(EvaluationModel)
                 .where(
                     EvaluationModel.submission_id == submission_id,
-                    EvaluationModel.success == True,
+                    EvaluationModel.success,
                 )
             )
             return result.scalar() or 0
@@ -143,6 +151,30 @@ class Database:
 
     async def get_leaderboard(self, limit: int = 100) -> list[SubmissionModel]:
         """Get top submissions by score."""
+        async with self.session_factory() as session:
+            result = await session.execute(
+                select(SubmissionModel)
+                .where(
+                    SubmissionModel.status == SubmissionStatus.FINISHED,
+                    SubmissionModel.final_score.isnot(None),
+                )
+                .order_by(desc(SubmissionModel.final_score))
+                .limit(limit)
+            )
+            return list(result.scalars().all())
+
+    async def get_top_submissions(self, limit: int = 5) -> list[SubmissionModel]:
+        """Get top N submissions by score for similarity checking.
+        
+        This is used during submission to check if new code is similar
+        to existing top-performing code (anti-copying).
+        
+        Args:
+            limit: Number of top submissions to return (default 5)
+            
+        Returns:
+            List of top submissions sorted by score (highest first)
+        """
         async with self.session_factory() as session:
             result = await session.execute(
                 select(SubmissionModel)

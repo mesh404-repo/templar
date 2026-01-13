@@ -39,7 +39,9 @@ class SubmissionModel(Base):
     bucket_path: Mapped[str] = mapped_column(String(256), nullable=False)
 
     status: Mapped[SubmissionStatus] = mapped_column(
-        Enum(SubmissionStatus), nullable=False, default=SubmissionStatus.PENDING
+        Enum(SubmissionStatus, values_callable=lambda obj: [e.value for e in obj]),
+        nullable=False,
+        default=SubmissionStatus.PENDING
     )
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
@@ -48,6 +50,24 @@ class SubmissionModel(Base):
 
     final_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Payment fields (anti-spam mechanism)
+    payment_block_hash: Mapped[str | None] = mapped_column(String(66), nullable=True)
+    payment_extrinsic_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    payment_amount_rao: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    payment_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    
+    # Anti-copying: Blockchain timestamp (proves code ownership)
+    # Miner posts code_hash to chain BEFORE submitting to validator
+    # Prevents malicious validators from stealing and resubmitting code
+    code_timestamp_block_hash: Mapped[str | None] = mapped_column(String(66), nullable=True)
+    code_timestamp_extrinsic_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    
+    # Anti-copying: Structural fingerprint (for cross-validator copy detection)
+    # Unlike code_hash which is completely different for any change,
+    # fingerprint is similar for similar code structures
+    # This allows validators to detect modified copies even if they never saw the original
+    code_fingerprint: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
 
     # Relationships
     evaluations: Mapped[list["EvaluationModel"]] = relationship(

@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Submission Details - Templar Competition</title>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css" rel="stylesheet" />
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-python.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #333;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        
+        header {
+            color: white;
+            margin-bottom: 30px;
+        }
+        
+        h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+        
+        .back-link {
+            color: white;
+            text-decoration: none;
+            font-size: 1.1em;
+            display: inline-block;
+            margin-bottom: 20px;
+        }
+        
+        .back-link:hover {
+            text-decoration: underline;
+        }
+        
+        .section {
+            background: white;
+            border-radius: 12px;
+            padding: 24px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        
+        .section-title {
+            font-size: 1.5em;
+            margin-bottom: 20px;
+            color: #667eea;
+            border-bottom: 2px solid #e5e7eb;
+            padding-bottom: 10px;
+        }
+        
+        .info-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        
+        .info-item {
+            padding: 12px;
+            background: #f9fafb;
+            border-radius: 8px;
+        }
+        
+        .info-label {
+            font-size: 0.85em;
+            color: #666;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 4px;
+        }
+        
+        .info-value {
+            font-size: 1.2em;
+            font-weight: 600;
+            color: #333;
+        }
+        
+        .status-badge {
+            padding: 6px 16px;
+            border-radius: 16px;
+            font-size: 0.9em;
+            font-weight: 600;
+            display: inline-block;
+        }
+        
+        .status-pending { background: #fef3c7; color: #92400e; }
+        .status-running { background: #dbeafe; color: #1e40af; }
+        .status-finished { background: #d1fae5; color: #065f46; }
+        .status-failed { background: #fee2e2; color: #991b1b; }
+        
+        .code-viewer {
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        
+        .code-viewer pre {
+            margin: 0 !important;
+            max-height: 600px;
+            overflow-y: auto;
+            font-size: 14px !important;
+            line-height: 1.6 !important;
+        }
+        
+        .code-viewer pre code {
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace !important;
+        }
+        
+        .eval-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 16px;
+        }
+        
+        .eval-table th {
+            background: #f3f4f6;
+            padding: 12px;
+            text-align: left;
+            font-weight: 600;
+            color: #374151;
+            border-bottom: 2px solid #e5e7eb;
+        }
+        
+        .eval-table td {
+            padding: 12px;
+            border-bottom: 1px solid #e5e7eb;
+        }
+        
+        .eval-table tr:hover {
+            background: #f9fafb;
+        }
+        
+        .score-highlight {
+            font-size: 1.5em;
+            font-weight: bold;
+            color: #10b981;
+        }
+        
+        .error {
+            background: #fee2e2;
+            color: #991b1b;
+            padding: 16px;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: white;
+            font-size: 1.2em;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <a href="/" class="back-link">← Back to Dashboard</a>
+        
+        <header>
+            <h1 id="page-title">⚡ Submission Details</h1>
+        </header>
+        
+        <div id="content">
+            <div class="loading">Loading submission...</div>
+        </div>
+    </div>
+    
+    <script>
+        const API_BASE = '';
+        const urlParams = new URLSearchParams(window.location.search);
+        const submissionId = urlParams.get('id');
+        
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+        
+        if (!submissionId) {
+            document.getElementById('content').innerHTML = `
+                <div class="error">
+                    No submission ID provided. Please provide ?id=SUBMISSION_ID in the URL.
+                </div>
+            `;
+        } else {
+            loadSubmission();
+        }
+        
+        async function loadSubmission() {
+            try {
+                // Load submission details
+                const submission = await fetch(`${API_BASE}/api/submissions/${submissionId}`).then(r => {
+                    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                    return r.json();
+                });
+                
+                // Load evaluations
+                const evaluations = await fetch(`${API_BASE}/api/submissions/${submissionId}/evaluations`)
+                    .then(r => r.ok ? r.json() : [])
+                    .catch(() => []);
+                
+                renderSubmission(submission, evaluations);
+            } catch (error) {
+                document.getElementById('content').innerHTML = `
+                    <div class="error">
+                        Failed to load submission.<br>
+                        Error: ${error.message}<br>
+                        Submission ID: ${submissionId}
+                    </div>
+                `;
+            }
+        }
+        
+        function renderSubmission(submission, evaluations) {
+            const statusClass = `status-${submission.status}`;
+            
+            let html = `
+                <!-- Submission Info -->
+                <div class="section">
+                    <h2 class="section-title">📋 Submission Information</h2>
+                    <div class="info-grid">
+                        <div class="info-item">
+                            <div class="info-label">Submission ID</div>
+                            <div class="info-value" style="font-size: 0.9em;">${submission.submission_id}</div>
+                        </div>
+                        <div class="info-item">
+                            <div class="info-label">Miner UID</div>
+                            <div class="info-value">${submission.miner_uid}</div>
+                        </div>
+                        <div class="info-item">
+                            <div class="info-label">Status</div>
+                            <div class="info-value">
+                                <span class="status-badge ${statusClass}">${submission.status}</span>
+                            </div>
+                        </div>
+                        <div class="info-item">
+                            <div class="info-label">Final Score (TPS)</div>
+                            <div class="info-value score-highlight">
+                                ${submission.final_score ? submission.final_score.toLocaleString() : 'Pending'}
+                            </div>
+                        </div>
+                        <div class="info-item">
+                            <div class="info-label">Submitted</div>
+                            <div class="info-value" style="font-size: 0.9em;">
+                                ${new Date(submission.created_at).toLocaleString()}
+                            </div>
+                        </div>
+                        <div class="info-item">
+                            <div class="info-label">Miner Hotkey</div>
+                            <div class="info-value" style="font-size: 0.8em;">
+                                ${submission.miner_hotkey.substring(0, 12)}...
+                            </div>
+                        </div>
+                    </div>
+                    
+                    ${submission.error_message ? `
+                        <div class="error" style="margin-top: 20px;">
+                            <strong>Error:</strong> ${submission.error_message}
+                        </div>
+                    ` : ''}
+                </div>
+                
+                <!-- Evaluations -->
+                ${evaluations.length > 0 ? `
+                <div class="section">
+                    <h2 class="section-title">📊 Evaluation Results</h2>
+                    <table class="eval-table">
+                        <thead>
+                            <tr>
+                                <th>Evaluation #</th>
+                                <th>TPS</th>
+                                <th>Tokens</th>
+                                <th>Wall Time</th>
+                                <th>Success</th>
+                                <th>Date</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${evaluations.map((eval, idx) => `
+                                <tr>
+                                    <td><strong>#${idx + 1}</strong></td>
+                                    <td class="score-highlight" style="font-size: 1em;">
+                                        ${eval.tokens_per_second ? eval.tokens_per_second.toLocaleString() : 'N/A'}
+                                    </td>
+                                    <td>${eval.total_tokens ? eval.total_tokens.toLocaleString() : 'N/A'}</td>
+                                    <td>${eval.wall_time_seconds ? eval.wall_time_seconds.toFixed(2) + 's' : 'N/A'}</td>
+                                    <td>${eval.success ? '✅' : '❌'}</td>
+                                    <td>${new Date(eval.created_at).toLocaleString()}</td>
+                                </tr>
+                            `).join('')}
+                        </tbody>
+                    </table>
+                    
+                    ${evaluations.length >= 3 ? `
+                        <p style="margin-top: 16px; color: #666;">
+                            <strong>Average TPS:</strong> 
+                            ${(evaluations.reduce((sum, e) => sum + (e.tokens_per_second || 0), 0) / evaluations.length).toLocaleString()}
+                        </p>
+                    ` : ''}
+                </div>
+                ` : `
+                <div class="section">
+                    <h2 class="section-title">📊 Evaluation Results</h2>
+                    <p style="color: #666;">No evaluations yet. Waiting for validator to process...</p>
+                </div>
+                `}
+                
+                <!-- Code Viewer -->
+                <div class="section">
+                    <h2 class="section-title">💻 Code Information</h2>
+                    <div class="info-item">
+                        <div class="info-label">Code Hash</div>
+                        <div class="info-value" style="font-size: 0.9em; font-family: monospace;">
+                            ${submission.code_hash}
+                        </div>
+                    </div>
+                    <div id="code-container" style="margin-top: 20px;">
+                        <p style="color: #666;">Loading code...</p>
+                    </div>
+                </div>
+            `;
+            
+            // Load and display code
+            fetch(`${API_BASE}/api/submissions/${submissionId}/code`)
+                .then(r => r.ok ? r.json() : null)
+                .then(data => {
+                    if (data && data.code) {
+                        document.getElementById('code-container').innerHTML = `
+                            <div class="code-viewer">
+                                <pre><code class="language-python">${escapeHtml(data.code)}</code></pre>
+                            </div>
+                        `;
+                        // Apply syntax highlighting
+                        Prism.highlightAll();
+                    } else {
+                        document.getElementById('code-container').innerHTML = `
+                            <p style="color: #999; font-style: italic;">
+                                Code not available (stored in private R2 bucket)
+                            </p>
+                        `;
+                    }
+                })
+                .catch(() => {
+                    document.getElementById('code-container').innerHTML = `
+                        <p style="color: #999; font-style: italic;">
+                            Code not available
+                        </p>
+                    `;
+                });
+            
+            html += '</div>';
+            
+            document.getElementById('content').innerHTML = html;
+            document.getElementById('page-title').textContent = `Submission by Miner UID ${submission.miner_uid}`;
+        }
+    </script>
+</body>
+</html>
+

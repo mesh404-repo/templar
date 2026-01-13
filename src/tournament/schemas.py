@@ -19,6 +19,8 @@ class SubmissionCreate(BaseModel):
 class SubmissionResponse(BaseModel):
     """Schema for submission API responses."""
 
+    model_config = {"from_attributes": True}
+
     submission_id: str
     miner_hotkey: str
     miner_uid: int
@@ -28,9 +30,6 @@ class SubmissionResponse(BaseModel):
     updated_at: datetime
     final_score: float | None = None
     error_message: str | None = None
-
-    class Config:
-        from_attributes = True
 
 
 class EvaluationCreate(BaseModel):
@@ -48,6 +47,8 @@ class EvaluationCreate(BaseModel):
 class EvaluationResponse(BaseModel):
     """Schema for evaluation API responses."""
 
+    model_config = {"from_attributes": True}
+
     evaluation_id: str
     submission_id: str
     evaluator_hotkey: str
@@ -57,9 +58,6 @@ class EvaluationResponse(BaseModel):
     success: bool
     error: str | None = None
     created_at: datetime
-
-    class Config:
-        from_attributes = True
 
 
 class LeaderboardEntry(BaseModel):
@@ -109,13 +107,12 @@ class InnerStepsResult(BaseModel):
         final_loss: Loss value from the last training step.
     """
 
+    model_config = {"arbitrary_types_allowed": True}
+
     # Note: final_logits is stored as a path in the sandbox output
     # because we can't serialize torch.Tensor directly in Pydantic
     total_tokens: int
     final_loss: float
-
-    class Config:
-        arbitrary_types_allowed = True
 
 
 class ReferenceResult(BaseModel):
