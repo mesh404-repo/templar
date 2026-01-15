@@ -138,7 +138,7 @@ btcli stake add --amount 1000 --wallet.name validator --wallet.hotkey validator_
 **Terminal 1 - API Server:**
 ```bash
 uv run python -m api.app
-# Dashboard: http://your-ip:8000/
+# Web Dashboard: http://your-ip:8000/
 ```
 
 **Terminal 2 - Validator:**
@@ -146,6 +146,12 @@ uv run python -m api.app
 uv run python -m neurons.validator \
     --wallet.name validator \
     --wallet.hotkey validator_hotkey
+```
+
+**Terminal 3 (Optional) - TUI Dashboard:**
+```bash
+uv run python -m tournament.tui
+# Terminal dashboard with vim-style navigation
 ```
 
 **Announce to miners:**
@@ -259,15 +265,41 @@ Weights update every 10 minutes. Hold #1 → Earn TAO continuously.
 
 ---
 
-## 📊 Dashboard Features
+## 📊 Dashboard
 
-Visit validator's dashboard to see:
+### Web Dashboard
+Visit validator's web dashboard at `http://<VALIDATOR_IP>:8000/` to see:
 - 📈 Network stats (submissions, top TPS, active miners)
 - ⚡ Validator status (live evaluations)
 - 📊 TPS history chart
 - 🏆 Leaderboard with rankings
 - 💻 Code viewer (submissions visible after evaluation)
 - 🔍 Detailed evaluation results per run
+
+### Terminal Dashboard (TUI)
+For validators/miners who prefer terminal:
+
+```bash
+# View live dashboard with real data
+uv run python -m tournament.tui
+
+# Options
+uv run python -m tournament.tui --url http://localhost:8000  # Custom API
+uv run python -m tournament.tui --demo                        # Demo mode
+uv run python -m tournament.tui --refresh 60                  # Refresh interval
+```
+
+**Controls:**
+| Key | Action |
+|-----|--------|
+| `j/k` | Navigate up/down |
+| `h/l` | Switch panels |
+| `Enter` | View submission details |
+| `j/k` (in code view) | Scroll code |
+| `c` | Toggle code view |
+| `b` | Back to dashboard |
+| `r` | Refresh |
+| `q` | Quit |
 
 ---
 
