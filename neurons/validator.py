@@ -142,12 +142,9 @@ class Validator(BaseNode):
         logger.info("Step 2: Evaluating submissions...")
         await self.evaluate_submissions()
 
-        # 3. Set weights periodically (skip on localnet - not supported)
+        # 3. Set weights periodically
         logger.info("Step 3: Checking weight setting...")
-        if self.config.subtensor_network != "local":
-            await self.maybe_set_weights()
-        else:
-            logger.info("Skipping weight setting (localnet mode)")
+        await self.maybe_set_weights()
 
         # 4. Sync metagraph periodically (every 5 minutes)
         logger.info("Step 4: Checking metagraph sync...")
