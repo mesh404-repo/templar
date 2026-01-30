@@ -1,3 +1,12 @@
+"""
+Basic training implementation - Miners can optimize this!
+
+Usage:
+    1. Run setup: uv run local_test/setup_benchmark.py
+    2. Test locally: uv run local_test/train.py
+    3. Submit when ready!
+"""
+
 import json
 import time
 from dataclasses import dataclass
@@ -8,117 +17,93 @@ import torch.nn.functional as F
 from transformers import AutoModelForCausalLM
 
 
-# =========================
-# GLOBAL CUDA OPTS (SAFE)
-# =========================
-if torch.cuda.is_available():
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
-    torch.backends.cudnn.benchmark = True
-    torch.set_float32_matmul_precision("high")
-
-
 @dataclass
 class InnerStepsResult:
-    final_logits: torch.Tensor
-    total_tokens: int
-    final_loss: float
+    """Required return type from inner_steps function."""
+
+    final_logits: torch.Tensor  # Output logits from last forward pass
+    total_tokens: int  # Total tokens processed across all steps
+    final_loss: float  # Loss value from last training step
+
+
+# Reuse compiled model across warmup and timed run (same process, same model id).
+_compiled_model_cache: dict[int, torch.nn.Module] = {}
 
 
 def inner_steps(model, data_iterator, optimizer, num_steps, device):
+    """
+    Run training steps and return results.
+
+    Args:
+        model: Pre-loaded model (already on device, in train mode)
+        data_iterator: Iterator yielding batches of shape (batch_size, seq_len)
+        optimizer: Pre-configured optimizer
+        num_steps: Number of training steps to run
+        device: Target device (cuda or cpu)
+
+    Returns:
+        InnerStepsResult with outputs for verification
+    """
     total_tokens = 0
     final_logits = None
     final_loss = 0.0
 
-    # Local refs (avoid attribute lookup cost)
+    if torch.cuda.is_available():
+        torch.set_float32_matmul_precision("medium")
+
+    # Reuse compiled model so warmup pays compile cost; timed run reuses cache.
+    model_id = id(model)
+    if model_id not in _compiled_model_cache:
+        _compiled_model_cache[model_id] = torch.compile(model, mode="reduce-overhead")
+    model = _compiled_model_cache[model_id]
+
     ce_loss = F.cross_entropy
 
-    # Compile model forward pass for speed (cache compiled function per model)
-    # Use model id as cache key to avoid recompiling same model
-    if not hasattr(inner_steps, "_compiled_forwards"):
-        inner_steps._compiled_forwards = {}
-    
-    model_id = id(model)
-    if model_id not in inner_steps._compiled_forwards:
-        # Compile forward pass (only forward, not backward, for training compatibility)
-        def _forward(input_ids):
-            return model(input_ids)
-        
-        # Compile with mode="reduce-overhead" for training loops (faster subsequent calls)
-        if device.type == "cuda" and hasattr(torch, "compile"):
-            try:
-                inner_steps._compiled_forwards[model_id] = torch.compile(_forward, mode="reduce-overhead")
-            except Exception:
-                # Fallback if compile fails
-                inner_steps._compiled_forwards[model_id] = _forward
-        else:
-            inner_steps._compiled_forwards[model_id] = _forward
-    
-    compiled_forward = inner_steps._compiled_forwards[model_id]
+    # Separate CUDA stream for prefetch (overlaps next-batch transfer with backward)
+    prefetch_stream = torch.cuda.Stream() if device.type == "cuda" else None
 
-    # Use CUDA stream for prefetching if available
-    prefetch_stream = None
-    if device.type == "cuda":
-        prefetch_stream = torch.cuda.Stream()
-
-    # Prefetch first batch
     batch = next(data_iterator)
     if batch.device != device:
-        batch = batch.to(device, non_blocking=True)
-
-    # Cache logits access pattern on first forward pass
-    _has_logits_attr = None
-    _get_logits = None
+        batch = batch.to(device, dtype=torch.long, non_blocking=True)
 
     next_batch = None
+    _get_logits = None
+
     for step in range(num_steps):
-        # Sync prefetch stream before using prefetched batch (if any)
         if prefetch_stream is not None and next_batch is not None:
             prefetch_stream.synchronize()
-        
         batch = next_batch if next_batch is not None else batch
-        
+
         input_ids = batch[:, :-1]
         labels = batch[:, 1:]
 
-        # Start prefetching next batch in separate stream (overlaps with backward pass)
         if step < num_steps - 1:
             if prefetch_stream is not None:
                 with torch.cuda.stream(prefetch_stream):
                     next_batch = next(data_iterator)
                     if next_batch.device != device:
-                        next_batch = next_batch.to(device, non_blocking=True)
+                        next_batch = next_batch.to(device, dtype=torch.long, non_blocking=True)
             else:
                 next_batch = next(data_iterator)
                 if next_batch.device != device:
-                    next_batch = next_batch.to(device, non_blocking=True)
+                    next_batch = next_batch.to(device, dtype=torch.long, non_blocking=True)
         else:
             next_batch = None
 
-        # Forward pass using compiled function (faster execution)
-        outputs = compiled_forward(input_ids)
-        
-        # Cache logits access pattern on first iteration
-        if _has_logits_attr is None:
-            _has_logits_attr = hasattr(outputs, "logits")
-            _get_logits = (lambda o: o.logits) if _has_logits_attr else (lambda o: o)
-        
+        outputs = model(input_ids, use_cache=False)
+        if _get_logits is None:
+            _get_logits = (lambda o: o.logits) if hasattr(outputs, "logits") else (lambda o: o)
         logits = _get_logits(outputs)
 
-        # Use view() instead of reshape() for contiguous tensors (faster, zero-copy)
-        # Logits from transformer models are typically contiguous
-        # Fallback to reshape if view fails (shouldn't happen for transformer logits)
+        vocab_size = logits.size(-1)
         try:
-            logits_flat = logits.view(-1, logits.size(-1))
+            logits_flat = logits.view(-1, vocab_size)
             labels_flat = labels.view(-1)
         except RuntimeError:
-            # Fallback if tensors are not contiguous (unlikely for transformer outputs)
-            logits_flat = logits.reshape(-1, logits.size(-1))
+            logits_flat = logits.reshape(-1, vocab_size)
             labels_flat = labels.reshape(-1)
 
         loss = ce_loss(logits_flat, labels_flat, ignore_index=-100)
-
-        # Backward pass (prefetch can overlap with this)
         loss.backward()
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
@@ -126,7 +111,7 @@ def inner_steps(model, data_iterator, optimizer, num_steps, device):
         total_tokens += batch.numel()
 
         if step == num_steps - 1:
-            final_logits = logits.detach()
+            final_logits = logits.detach().float()
             final_loss = loss.item()
 
     return InnerStepsResult(
@@ -136,15 +121,22 @@ def inner_steps(model, data_iterator, optimizer, num_steps, device):
     )
 
 
-# =========================
-# LOCAL TEST
-# =========================
+# =============================================================================
+# LOCAL TESTING - Run this file to test your implementation
+# =============================================================================
 if __name__ == "__main__":
+    # Speed opts for local runs only (validators use their own settings)
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.benchmark = True
+
     print("=" * 60)
-    print("TESTING train.py (IMPROVED TPS)")
+    print("TESTING train.py - Basic Implementation")
     print("=" * 60)
     print()
 
+    # Load configuration
     hparams_path = Path(__file__).parent.parent / "hparams" / "hparams.json"
     hparams = {}
     if hparams_path.exists():
@@ -160,16 +152,23 @@ if __name__ == "__main__":
     print(f"Evaluations: {num_evals}")
     print()
 
+    # Check paths
     project_root = Path(__file__).parent.parent
     model_path = project_root / "benchmark" / "model"
     data_path = project_root / "benchmark" / "data" / "train.pt"
 
+    if not model_path.exists() or not data_path.exists():
+        print("Setup required! Run: uv run local_test/setup_benchmark.py")
+        exit(1)
+
+    # Setup device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
     if torch.cuda.is_available():
         print(f"GPU: {torch.cuda.get_device_name(0)}")
     print()
 
+    # Load model
     print("Loading model...")
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
@@ -177,33 +176,39 @@ if __name__ == "__main__":
         device_map="auto",
         trust_remote_code=True,
     )
-    # Use KV cache for faster forward (higher TPS). Disable gradient checkpointing
-    # so use_cache can be True; this uses more GPU memory.
-    model.config.use_cache = True
+    model.gradient_checkpointing_enable()  # Required to fit in GPU memory
     model.train()
     print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
     print()
 
+    # Load data; pin_memory speeds up CPU->GPU transfer when using non_blocking=True
     print("Loading data...")
     data = torch.load(data_path, weights_only=True)
-    # Pin memory for faster transfers
     if torch.cuda.is_available():
         data = data.pin_memory()
-    print(f"Samples: {data.shape[0]:,}, Seq len: {data.shape[1]}")
+    print(f"Samples: {data.shape[0]:,}, Sequence length: {data.shape[1]}")
     print()
 
+    # Create data iterator
     def create_iterator():
         idx = 0
         while True:
-            end = idx + batch_size
-            if end > data.shape[0]:
+            end_idx = idx + batch_size
+            if end_idx > data.shape[0]:
                 idx = 0
-                end = batch_size
-            yield data[idx:end]
-            idx = end
+                end_idx = batch_size
+            yield data[idx:end_idx]
+            idx = end_idx
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    # Fused AdamW can be faster on CUDA (PyTorch 2.0+)
+    try:
+        optimizer = torch.optim.AdamW(
+            model.parameters(), lr=1e-4, fused=torch.cuda.is_available()
+        )
+    except TypeError:
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
 
+    # Warmup (compile happens here; timed run reuses compiled model)
     print("Warmup...")
     _ = inner_steps(model, create_iterator(), optimizer, num_steps=2, device=device)
     if torch.cuda.is_available():
@@ -211,13 +216,15 @@ if __name__ == "__main__":
         torch.cuda.empty_cache()
     print()
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    try:
+        optimizer = torch.optim.AdamW(
+            model.parameters(), lr=1e-4, fused=torch.cuda.is_available()
+        )
+    except TypeError:
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
 
-    total_time = 0.0
-    total_tokens = 0
-    tokens_per_second_list = []
-
-    print(f"Running {num_evals} evaluations...\n")
+    # Run evaluations
+    print(f"Running {num_evals} evaluations...")
 
     for i in range(num_evals):
         if torch.cuda.is_available():
@@ -230,31 +237,9 @@ if __name__ == "__main__":
             torch.cuda.synchronize()
 
         elapsed = time.perf_counter() - start
-        tps = result.total_tokens / elapsed
-
-        total_time += elapsed
-        total_tokens += result.total_tokens
-        tokens_per_second_list.append(tps)
-
         print(
-            f"Eval {i+1}: {elapsed:.3f}s | "
-            f"tokens={result.total_tokens:,} | "
-            f"TPS={tps:,.0f} | "
-            f"loss={result.final_loss:.4f}"
+            f"  Eval {i + 1}: {elapsed:.3f}s, tokens={result.total_tokens:,}, loss={result.final_loss:.4f}"
         )
 
     print()
-    print("=" * 60)
-    print("PERFORMANCE SUMMARY")
-    print("=" * 60)
-    print(f"Total time: {total_time:.3f}s")
-    print(f"Total tokens: {total_tokens:,}")
-    print(f"Average tokens/second: {total_tokens / total_time:,.0f}")
-
-    if tokens_per_second_list:
-        print(f"Min tokens/s: {min(tokens_per_second_list):,.0f}")
-        print(f"Max tokens/s: {max(tokens_per_second_list):,.0f}")
-        print(f"Avg tokens/s: {sum(tokens_per_second_list)/len(tokens_per_second_list):,.0f}")
-
-    print(f"Average time per eval: {total_time / num_evals:.3f}s")
-    print()
+    print("Done!")
