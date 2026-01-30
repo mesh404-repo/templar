@@ -30,6 +30,9 @@ def inner_steps(model, data_iterator, optimizer, num_steps, device):
     """
     Run training steps and return results.
 
+    Optimized for TPS: mixed precision (autocast), zero_grad(set_to_none=True),
+    non_blocking transfer, and prefetch next batch to overlap transfer with compute.
+
     Args:
         model: Pre-loaded model (already on device, in train mode)
         data_iterator: Iterator yielding batches of shape (batch_size, seq_len)
@@ -44,37 +47,39 @@ def inner_steps(model, data_iterator, optimizer, num_steps, device):
     final_logits = None
     final_loss = 0.0
 
-    for step in range(num_steps):
-        # Get batch
-        batch = next(data_iterator)
-        batch = batch.to(device)
+    # Prefetch first batch (enables overlap in loop)
+    batch = next(data_iterator)
+    batch = batch.to(device, dtype=torch.long, non_blocking=True)
 
-        # Prepare inputs and labels
+    for step in range(num_steps):
+        # Views only, no copy
         input_ids = batch[:, :-1]
         labels = batch[:, 1:]
 
-        # Forward pass
-        outputs = model(input_ids)
-        logits = outputs.logits if hasattr(outputs, "logits") else outputs
+        # Forward pass with mixed precision (faster, matches reference)
+        with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+            outputs = model(input_ids)
+            logits = outputs.logits if hasattr(outputs, "logits") else outputs
+            loss = F.cross_entropy(
+                logits.reshape(-1, logits.size(-1)),
+                labels.reshape(-1),
+                ignore_index=-100,
+            )
 
-        # Compute loss
-        loss = F.cross_entropy(
-            logits.reshape(-1, logits.size(-1)),
-            labels.reshape(-1),
-            ignore_index=-100,
-        )
-
-        # Backward pass
+        # Backward and step
         loss.backward()
-
-        # Update weights
         optimizer.step()
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
 
         # Track metrics
         total_tokens += batch.numel()
         final_logits = logits.detach().float()
         final_loss = loss.item()
+
+        # Prefetch next batch (overlap transfer with next iteration's compute)
+        if step < num_steps - 1:
+            batch = next(data_iterator)
+            batch = batch.to(device, dtype=torch.long, non_blocking=True)
 
     return InnerStepsResult(
         final_logits=final_logits,
