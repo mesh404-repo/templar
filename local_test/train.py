@@ -173,11 +173,13 @@ if __name__ == "__main__":
     print("Loading model...")
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
-        dtype=torch.bfloat16,
+        torch_dtype=torch.bfloat16,
         device_map="auto",
         trust_remote_code=True,
     )
-    model.gradient_checkpointing_enable()
+    # Use KV cache for faster forward (higher TPS). Disable gradient checkpointing
+    # so use_cache can be True; this uses more GPU memory.
+    model.config.use_cache = True
     model.train()
     print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
     print()
