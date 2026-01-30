@@ -59,7 +59,7 @@ def inner_steps(model, data_iterator, optimizer, num_steps, device):
 
     ce_loss = F.cross_entropy
 
-    # Separate CUDA stream for prefetch (overlaps next-batch transfer with backward)
+    # Separate CUDA stream for prefetch: overlap next-batch transfer with backward (research: CUDA streams + non_blocking)
     prefetch_stream = torch.cuda.Stream() if device.type == "cuda" else None
 
     batch = next(data_iterator)
@@ -67,7 +67,7 @@ def inner_steps(model, data_iterator, optimizer, num_steps, device):
         batch = batch.to(device, dtype=torch.long, non_blocking=True)
 
     next_batch = None
-    _get_logits = None
+    _get_logits = None  # Cache logits access on first step to avoid hasattr every iteration
 
     for step in range(num_steps):
         if prefetch_stream is not None and next_batch is not None:
@@ -110,6 +110,7 @@ def inner_steps(model, data_iterator, optimizer, num_steps, device):
 
         total_tokens += batch.numel()
 
+        # Only .item() on last step to minimize CPU-GPU sync (research: .item() forces synchronization)
         if step == num_steps - 1:
             final_logits = logits.detach().float()
             final_loss = loss.item()
@@ -200,7 +201,7 @@ if __name__ == "__main__":
             yield data[idx:end_idx]
             idx = end_idx
 
-    # Fused AdamW can be faster on CUDA (PyTorch 2.0+)
+    # Fused AdamW can reduce kernel launches on CUDA (PyTorch 2.0+); fallback for older PyTorch
     try:
         optimizer = torch.optim.AdamW(
             model.parameters(), lr=1e-4, fused=torch.cuda.is_available()
