@@ -7,7 +7,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: one-covenant/templar-eval
+  IMAGE_NAME: one-covenant/templar-crusades
 
 jobs:
   build-and-push:
@@ -50,7 +50,8 @@ jobs:
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
-          context: ./environments/templar
+          context: .
+          file: ./docker/Dockerfile
           push: true
           platforms: linux/amd64
           tags: ${{ steps.meta.outputs.tags }}
