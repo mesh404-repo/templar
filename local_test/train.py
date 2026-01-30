@@ -24,110 +24,65 @@ class InnerStepsResult:
     total_tokens: int
     final_loss: float
 
+_compiled_model_cache = {}
 
 def inner_steps(model, data_iterator, optimizer, num_steps, device):
+    global _compiled_model_cache
+
+    model_id = id(model)
+    if model_id not in _compiled_model_cache:
+        _compiled_model_cache[model_id] = torch.compile(model, mode="reduce-overhead")
+
+    model = _compiled_model_cache[model_id]
+
     total_tokens = 0
     final_logits = None
     final_loss = 0.0
 
     # Local refs (avoid attribute lookup cost)
     ce_loss = F.cross_entropy
-
-    # Compile model forward pass for speed (cache compiled function per model)
-    # Use model id as cache key to avoid recompiling same model
-    if not hasattr(inner_steps, "_compiled_forwards"):
-        inner_steps._compiled_forwards = {}
-    
-    model_id = id(model)
-    if model_id not in inner_steps._compiled_forwards:
-        # Compile forward pass (only forward, not backward, for training compatibility)
-        def _forward(input_ids):
-            return model(input_ids)
-        
-        # Compile with mode="reduce-overhead" for training loops (faster subsequent calls)
-        if device.type == "cuda" and hasattr(torch, "compile"):
-            try:
-                inner_steps._compiled_forwards[model_id] = torch.compile(_forward, mode="reduce-overhead")
-            except Exception:
-                # Fallback if compile fails
-                inner_steps._compiled_forwards[model_id] = _forward
-        else:
-            inner_steps._compiled_forwards[model_id] = _forward
-    
-    compiled_forward = inner_steps._compiled_forwards[model_id]
-
-    # Use CUDA stream for prefetching if available
-    prefetch_stream = None
-    if device.type == "cuda":
-        prefetch_stream = torch.cuda.Stream()
+    model_train = model.train
+    tensor_numel = torch.Tensor.numel
+    tensor_reshape = torch.Tensor.reshape
 
     # Prefetch first batch
     batch = next(data_iterator)
     if batch.device != device:
         batch = batch.to(device, non_blocking=True)
 
-    # Cache logits access pattern on first forward pass
-    _has_logits_attr = None
-    _get_logits = None
-
-    next_batch = None
     for step in range(num_steps):
-        # Sync prefetch stream before using prefetched batch (if any)
-        if prefetch_stream is not None and next_batch is not None:
-            prefetch_stream.synchronize()
-        
-        batch = next_batch if next_batch is not None else batch
-        
         input_ids = batch[:, :-1]
         labels = batch[:, 1:]
 
-        # Start prefetching next batch in separate stream (overlaps with backward pass)
+        # Prefetch next batch while computing current
         if step < num_steps - 1:
-            if prefetch_stream is not None:
-                with torch.cuda.stream(prefetch_stream):
-                    next_batch = next(data_iterator)
-                    if next_batch.device != device:
-                        next_batch = next_batch.to(device, non_blocking=True)
-            else:
-                next_batch = next(data_iterator)
-                if next_batch.device != device:
-                    next_batch = next_batch.to(device, non_blocking=True)
+            next_batch = next(data_iterator)
+            if next_batch.device != device:
+                next_batch = next_batch.to(device, non_blocking=True)
         else:
             next_batch = None
 
-        # Forward pass using compiled function (faster execution)
-        outputs = compiled_forward(input_ids)
-        
-        # Cache logits access pattern on first iteration
-        if _has_logits_attr is None:
-            _has_logits_attr = hasattr(outputs, "logits")
-            _get_logits = (lambda o: o.logits) if _has_logits_attr else (lambda o: o)
-        
-        logits = _get_logits(outputs)
+        # Forward pass (model already in bfloat16)
+        outputs = model(input_ids)
+        logits = outputs.logits
 
-        # Use view() instead of reshape() for contiguous tensors (faster, zero-copy)
-        # Logits from transformer models are typically contiguous
-        # Fallback to reshape if view fails (shouldn't happen for transformer logits)
-        try:
-            logits_flat = logits.view(-1, logits.size(-1))
-            labels_flat = labels.view(-1)
-        except RuntimeError:
-            # Fallback if tensors are not contiguous (unlikely for transformer outputs)
-            logits_flat = logits.reshape(-1, logits.size(-1))
-            labels_flat = labels.reshape(-1)
+        loss = ce_loss(
+            tensor_reshape(logits, (-1, logits.size(-1))),
+            tensor_reshape(labels, (-1,)),
+            ignore_index=-100,
+        )
 
-        loss = ce_loss(logits_flat, labels_flat, ignore_index=-100)
-
-        # Backward pass (prefetch can overlap with this)
         loss.backward()
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
 
-        total_tokens += batch.numel()
+        total_tokens += tensor_numel(batch)
 
         if step == num_steps - 1:
             final_logits = logits.detach()
             final_loss = loss.item()
+
+        batch = next_batch
 
     return InnerStepsResult(
         final_logits=final_logits,
@@ -173,13 +128,11 @@ if __name__ == "__main__":
     print("Loading model...")
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
         device_map="auto",
         trust_remote_code=True,
     )
-    # Use KV cache for faster forward (higher TPS). Disable gradient checkpointing
-    # so use_cache can be True; this uses more GPU memory.
-    model.config.use_cache = True
+    model.gradient_checkpointing_enable()
     model.train()
     print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
     print()
@@ -202,7 +155,7 @@ if __name__ == "__main__":
             yield data[idx:end]
             idx = end
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, fused=True if torch.cuda.is_available() else False)
 
     print("Warmup...")
     _ = inner_steps(model, create_iterator(), optimizer, num_steps=2, device=device)
@@ -211,7 +164,7 @@ if __name__ == "__main__":
         torch.cuda.empty_cache()
     print()
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, fused=True if torch.cuda.is_available() else False)
 
     total_time = 0.0
     total_tokens = 0
@@ -220,9 +173,6 @@ if __name__ == "__main__":
     print(f"Running {num_evals} evaluations...\n")
 
     for i in range(num_evals):
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-
         start = time.perf_counter()
         result = inner_steps(model, create_iterator(), optimizer, num_steps, device)
 
