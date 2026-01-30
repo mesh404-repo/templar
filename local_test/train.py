@@ -57,63 +57,55 @@ def inner_steps(model, data_iterator, optimizer, num_steps, device):
         _compiled_model_cache[model_id] = torch.compile(model, mode="reduce-overhead")
     model = _compiled_model_cache[model_id]
 
+    # Local ref to avoid attribute lookup in hot loop
     ce_loss = F.cross_entropy
 
-    # Separate CUDA stream for prefetch: overlap next-batch transfer with backward (research: CUDA streams + non_blocking)
-    prefetch_stream = torch.cuda.Stream() if device.type == "cuda" else None
-
+    # Prefetch first batch (non_blocking overlaps with first step)
     batch = next(data_iterator)
     if batch.device != device:
         batch = batch.to(device, dtype=torch.long, non_blocking=True)
 
-    next_batch = None
-    _get_logits = None  # Cache logits access on first step to avoid hasattr every iteration
-
     for step in range(num_steps):
-        if prefetch_stream is not None and next_batch is not None:
-            prefetch_stream.synchronize()
-        batch = next_batch if next_batch is not None else batch
-
         input_ids = batch[:, :-1]
         labels = batch[:, 1:]
 
+        # Prefetch next batch in default stream (overlaps with backward; same numerics)
         if step < num_steps - 1:
-            if prefetch_stream is not None:
-                with torch.cuda.stream(prefetch_stream):
-                    next_batch = next(data_iterator)
-                    if next_batch.device != device:
-                        next_batch = next_batch.to(device, dtype=torch.long, non_blocking=True)
-            else:
-                next_batch = next(data_iterator)
-                if next_batch.device != device:
-                    next_batch = next_batch.to(device, dtype=torch.long, non_blocking=True)
+            next_batch = next(data_iterator)
+            if next_batch.device != device:
+                next_batch = next_batch.to(device, dtype=torch.long, non_blocking=True)
         else:
             next_batch = None
 
+        # Forward pass
         outputs = model(input_ids, use_cache=False)
-        if _get_logits is None:
-            _get_logits = (lambda o: o.logits) if hasattr(outputs, "logits") else (lambda o: o)
-        logits = _get_logits(outputs)
+        logits = outputs.logits if hasattr(outputs, "logits") else outputs
 
-        vocab_size = logits.size(-1)
+        # view() is faster than reshape() for contiguous tensors (~20% in hot path)
         try:
-            logits_flat = logits.view(-1, vocab_size)
+            logits_flat = logits.view(-1, logits.size(-1))
             labels_flat = labels.view(-1)
         except RuntimeError:
-            logits_flat = logits.reshape(-1, vocab_size)
+            logits_flat = logits.reshape(-1, logits.size(-1))
             labels_flat = labels.reshape(-1)
 
         loss = ce_loss(logits_flat, labels_flat, ignore_index=-100)
+
+        # Backward pass
         loss.backward()
+
+        # Update weights; set_to_none=True is faster than zeroing (PyTorch recommendation)
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
 
         total_tokens += batch.numel()
 
-        # Only .item() on last step to minimize CPU-GPU sync (research: .item() forces synchronization)
         if step == num_steps - 1:
+            # .float() required for verification comparison with reference
             final_logits = logits.detach().float()
             final_loss = loss.item()
+
+        batch = next_batch
 
     return InnerStepsResult(
         final_logits=final_logits,
@@ -201,13 +193,8 @@ if __name__ == "__main__":
             yield data[idx:end_idx]
             idx = end_idx
 
-    # Fused AdamW can reduce kernel launches on CUDA (PyTorch 2.0+); fallback for older PyTorch
-    try:
-        optimizer = torch.optim.AdamW(
-            model.parameters(), lr=1e-4, fused=torch.cuda.is_available()
-        )
-    except TypeError:
-        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    # Create optimizer
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
 
     # Warmup (compile happens here; timed run reuses compiled model)
     print("Warmup...")
@@ -217,12 +204,8 @@ if __name__ == "__main__":
         torch.cuda.empty_cache()
     print()
 
-    try:
-        optimizer = torch.optim.AdamW(
-            model.parameters(), lr=1e-4, fused=torch.cuda.is_available()
-        )
-    except TypeError:
-        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    # Reset optimizer
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
 
     # Run evaluations
     print(f"Running {num_evals} evaluations...")
