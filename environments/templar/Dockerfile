@@ -13,10 +13,12 @@
 FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
 
 # Install system dependencies (as root, before switching user)
+# NOTE: build-essential (gcc) is required for torch.compile inductor backend
 RUN apt-get update && apt-get install -y \
     git \
     curl \
     ca-certificates \
+    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user for security
@@ -47,8 +49,9 @@ print('Model cached successfully')"
 
 # Pre-download dataset samples for offline evaluation
 # We download raw text and shuffle with validator seed at runtime
+# NOTE: datasets library has a threading bug that crashes on exit, but data is saved
 COPY --chown=appuser:appuser cache_dataset.py /app/
-RUN python /app/cache_dataset.py
+RUN python /app/cache_dataset.py || [ -f /home/appuser/.cache/templar/dataset.json ]
 
 # Copy validator's evaluation logic
 # This Actor.evaluate() receives miner's code directly from validator

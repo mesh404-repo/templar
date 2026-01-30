@@ -399,9 +399,12 @@ asyncio.run(main())
                     # PyTorch with OpenMP needs many threads, 1024 is reasonable
                     "--pids-limit",
                     "1024",
-                    # Writable /tmp for temporary files (limited size)
+                    # Writable /tmp for temporary files (exec needed for torch.compile)
                     "--tmpfs",
-                    "/tmp:rw,noexec,nosuid,size=4g",
+                    "/tmp:rw,exec,nosuid,size=4g",
+                    # Writable Triton cache for torch.compile kernels (exec needed for .so files)
+                    "--tmpfs",
+                    "/home/appuser/.triton:rw,exec,size=2g",
                     # NOTE: Don't mount tmpfs on ~/.cache/huggingface - model is pre-cached there!
                 ]
             )
