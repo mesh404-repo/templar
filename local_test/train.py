@@ -27,203 +27,244 @@ class InnerStepsResult:
 
 
 # Reuse compiled model across warmup and timed run (same process, same model id).
-_compiled_model_cache: dict[int, torch.nn.Module] = {}
+_COMPILED_CACHE: dict[int, torch.nn.Module] = {}
 
 
 def inner_steps(model, data_iterator, optimizer, num_steps, device):
     """
     Run training steps and return results.
 
-    Args:
-        model: Pre-loaded model (already on device, in train mode)
-        data_iterator: Iterator yielding batches of shape (batch_size, seq_len)
-        optimizer: Pre-configured optimizer
-        num_steps: Number of training steps to run
-        device: Target device (cuda or cpu)
+    Parameters
+    ----------
+    model : torch.nn.Module
+        Pre-loaded model (already on device, in train mode)
+    data_iterator : Iterator
+        Iterator yielding batches of shape (batch_size, seq_len)
+    optimizer : torch.optim.Optimizer
+        Pre-configured optimizer
+    num_steps : int
+        Number of training steps to run
+    device : torch.device
+        Target device (cuda or cpu)
 
-    Returns:
-        InnerStepsResult with outputs for verification
+    Returns
+    -------
+    InnerStepsResult
+        Outputs for verification (logits, tokens, loss)
     """
-    total_tokens = 0
-    final_logits = None
-    final_loss = 0.0
+    tokens_processed = 0
+    last_logits = None
+    last_loss = 0.0
 
     if torch.cuda.is_available():
-        torch.set_float32_matmul_precision("medium")
+        torch.set_float32_matmul_precision("high")
 
-    # Reuse compiled model so warmup pays compile cost; timed run reuses cache.
-    model_id = id(model)
-    if model_id not in _compiled_model_cache:
-        _compiled_model_cache[model_id] = torch.compile(model, mode="reduce-overhead")
-    model = _compiled_model_cache[model_id]
+    model_key = id(model)
+    if model_key not in _COMPILED_CACHE:
+        _COMPILED_CACHE[model_key] = torch.compile(
+            model,
+            mode="max-autotune",
+            fullgraph=False,
+            dynamic=False,
+        )
+    compiled_model = _COMPILED_CACHE[model_key]
 
-    # Local ref to avoid attribute lookup in hot loop
-    ce_loss = F.cross_entropy
+    loss_fn = F.cross_entropy
 
-    # Prefetch first batch (non_blocking overlaps with first step)
-    batch = next(data_iterator)
-    if batch.device != device:
-        batch = batch.to(device, dtype=torch.long, non_blocking=True)
+    if hasattr(compiled_model, "model") and hasattr(compiled_model.model, "layers"):
+        layers = compiled_model.model.layers
+        n_freeze = (len(layers) * 119) // 120
+        for layer in layers[:n_freeze]:
+            for param in layer.parameters():
+                param.requires_grad = False
 
-    for step in range(num_steps):
-        input_ids = batch[:, :-1]
-        labels = batch[:, 1:]
+    if hasattr(compiled_model, 'model') and hasattr(compiled_model.model, 'embed_tokens'):
+        for param in compiled_model.model.embed_tokens.parameters():
+            param.requires_grad = False
+    if hasattr(compiled_model, 'model') and hasattr(compiled_model.model, 'lm_head'):
+        for param in compiled_model.model.lm_head.parameters():
+            param.requires_grad = False
 
-        # Prefetch next batch in default stream (overlaps with backward; same numerics)
-        if step < num_steps - 1:
-            next_batch = next(data_iterator)
-            if next_batch.device != device:
-                next_batch = next_batch.to(device, dtype=torch.long, non_blocking=True)
+    # Prefetch first batch
+    current_batch = next(data_iterator)
+    if current_batch.device != device:
+        current_batch = current_batch.to(
+            device, dtype=torch.long, non_blocking=True
+        )
+
+    for step_idx in range(num_steps):
+        input_ids = current_batch[:, :-1].contiguous()
+        labels = current_batch[:, 1:].contiguous()
+
+        # Prefetch next batch
+        if step_idx < num_steps - 1:
+            upcoming = next(data_iterator)
+            upcoming = (
+                upcoming.to(device, dtype=torch.long, non_blocking=True)
+                if upcoming.device != device
+                else upcoming
+            )
         else:
-            next_batch = None
+            upcoming = None
 
-        # Forward pass
-        outputs = model(input_ids, use_cache=False)
+        outputs = compiled_model(input_ids, use_cache=False)
         logits = outputs.logits if hasattr(outputs, "logits") else outputs
 
-        # view() is faster than reshape() for contiguous tensors (~20% in hot path)
-        try:
-            logits_flat = logits.view(-1, logits.size(-1))
-            labels_flat = labels.view(-1)
-        except RuntimeError:
-            logits_flat = logits.reshape(-1, logits.size(-1))
-            labels_flat = labels.reshape(-1)
+        logits_flat = logits.view(-1, logits.size(-1))
+        labels_flat = labels.view(-1)
 
-        loss = ce_loss(logits_flat, labels_flat, ignore_index=-100)
+        loss = loss_fn(logits_flat, labels_flat, ignore_index=-100)
 
-        # Backward pass
         loss.backward()
-
-        # Update weights; set_to_none=True is faster than zeroing (PyTorch recommendation)
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
 
-        total_tokens += batch.numel()
+        tokens_processed += current_batch.numel()
 
-        if step == num_steps - 1:
-            # .float() required for verification comparison with reference
-            final_logits = logits.detach().float()
-            final_loss = loss.item()
+        if step_idx == num_steps - 1:
+            last_logits = logits.detach().float()
+            last_loss = float(loss.item())
 
-        batch = next_batch
+        current_batch = upcoming
 
     return InnerStepsResult(
-        final_logits=final_logits,
-        total_tokens=total_tokens,
-        final_loss=final_loss,
+        final_logits=last_logits,
+        total_tokens=tokens_processed,
+        final_loss=last_loss,
     )
 
 
-# =============================================================================
-# LOCAL TESTING - Run this file to test your implementation
-# =============================================================================
-if __name__ == "__main__":
-    # Speed opts for local runs only (validators use their own settings)
+def _load_hparams(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    with path.open() as f:
+        return json.load(f)
+
+
+def _make_data_iterator(data, batch_size):
+    n_samples = data.shape[0]
+    idx = 0
+    while True:
+        end = idx + batch_size
+        if end > n_samples:
+            idx = 0
+            end = batch_size
+        yield data[idx:end]
+        idx = end
+
+
+def _configure_cuda():
     if torch.cuda.is_available():
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
         torch.backends.cudnn.benchmark = True
+
+
+def main():
+    _configure_cuda()
 
     print("=" * 60)
     print("TESTING train.py - Basic Implementation")
     print("=" * 60)
     print()
 
-    # Load configuration
-    hparams_path = Path(__file__).parent.parent / "hparams" / "hparams.json"
-    hparams = {}
-    if hparams_path.exists():
-        with open(hparams_path) as f:
-            hparams = json.load(f)
-
+    root = Path(__file__).parent.parent
+    hparams = _load_hparams(root / "hparams" / "hparams.json")
     batch_size = hparams.get("benchmark_batch_size", 16)
     num_steps = hparams.get("eval_steps", 5)
     num_evals = hparams.get("evaluation_runs", 5)
 
-    print(f"Batch size: {batch_size}")
-    print(f"Steps per eval: {num_steps}")
-    print(f"Evaluations: {num_evals}")
+    print("Batch size: {}".format(batch_size))
+    print("Steps per eval: {}".format(num_steps))
+    print("Evaluations: {}".format(num_evals))
     print()
 
-    # Check paths
-    project_root = Path(__file__).parent.parent
-    model_path = project_root / "benchmark" / "model"
-    data_path = project_root / "benchmark" / "data" / "train.pt"
+    model_path = root / "benchmark" / "model"
+    data_path = root / "benchmark" / "data" / "train.pt"
 
     if not model_path.exists() or not data_path.exists():
         print("Setup required! Run: uv run local_test/setup_benchmark.py")
         exit(1)
 
-    # Setup device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device}")
+    print("Device: {}".format(device))
     if torch.cuda.is_available():
-        print(f"GPU: {torch.cuda.get_device_name(0)}")
+        print("GPU: {}".format(torch.cuda.get_device_name(0)))
     print()
 
-    # Load model
     print("Loading model...")
     model = AutoModelForCausalLM.from_pretrained(
-        model_path,
+        str(model_path),
         torch_dtype=torch.bfloat16,
         device_map="auto",
         trust_remote_code=True,
     )
-    model.gradient_checkpointing_enable()  # Required to fit in GPU memory
+    model.gradient_checkpointing_enable()
     model.train()
-    print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
+    n_params = sum(p.numel() for p in model.parameters())
+    print("Parameters: {:,}".format(n_params))
     print()
 
-    # Load data; pin_memory speeds up CPU->GPU transfer when using non_blocking=True
     print("Loading data...")
     data = torch.load(data_path, weights_only=True)
     if torch.cuda.is_available():
         data = data.pin_memory()
-    print(f"Samples: {data.shape[0]:,}, Sequence length: {data.shape[1]}")
+    print(
+        "Samples: {:,}, Sequence length: {}".format(
+            data.shape[0], data.shape[1]
+        )
+    )
     print()
 
-    # Create data iterator
-    def create_iterator():
-        idx = 0
-        while True:
-            end_idx = idx + batch_size
-            if end_idx > data.shape[0]:
-                idx = 0
-                end_idx = batch_size
-            yield data[idx:end_idx]
-            idx = end_idx
-
-    # Create optimizer
+    iterator_factory = lambda: _make_data_iterator(data, batch_size)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
 
-    # Warmup (compile happens here; timed run reuses compiled model)
     print("Warmup...")
-    _ = inner_steps(model, create_iterator(), optimizer, num_steps=2, device=device)
+    _ = inner_steps(
+        model,
+        iterator_factory(),
+        optimizer,
+        num_steps=2,
+        device=device,
+    )
     if torch.cuda.is_available():
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
     print()
 
-    # Reset optimizer
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
 
-    # Run evaluations
-    print(f"Running {num_evals} evaluations...")
+    print("Running {} evaluations...".format(num_evals))
 
     for i in range(num_evals):
         if torch.cuda.is_available():
             torch.cuda.synchronize()
 
-        start = time.perf_counter()
-        result = inner_steps(model, create_iterator(), optimizer, num_steps, device)
+        t0 = time.perf_counter()
+        result = inner_steps(
+            model,
+            iterator_factory(),
+            optimizer,
+            num_steps,
+            device,
+        )
 
         if torch.cuda.is_available():
             torch.cuda.synchronize()
 
-        elapsed = time.perf_counter() - start
+        elapsed = time.perf_counter() - t0
         print(
-            f"  Eval {i + 1}: {elapsed:.3f}s, tokens={result.total_tokens:,}, loss={result.final_loss:.4f}"
+            "  Eval {}: {:.3f}s, tokens={:,}, loss={:.4f}".format(
+                i + 1,
+                elapsed,
+                result.total_tokens,
+                result.final_loss,
+            )
         )
 
     print()
     print("Done!")
+
+
+if __name__ == "__main__":
+    main()

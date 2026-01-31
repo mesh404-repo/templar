@@ -1,0 +1,6 @@
+could you please add more optimization step into this file? please more powerful googling or web scrapping. you have many time now. so think carefullly and if you verify if this is correct, please add that code part. please think many times and googling many times
+
+@local_test/train.py 
+this is training code
+please optimize training code, validators evaluate it in a controlled environment, and the fastest implementation wins. validators verify this solution using `verify.py` multiple times and give  the median TPS as final score.so goal is to upgrade final score as high. if posible, please googling and give me optimized code for this
+please more powerful googling or web scrapping. you have many time now. so think carefullly and if you verify if this is correct, please add that code part. please think many times and googling many times
