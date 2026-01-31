@@ -65,10 +65,12 @@ def inner_steps(model, data_iterator, optimizer, num_steps, device):
     
     if hasattr(model, 'model') and hasattr(model.model, 'layers'):
         num_layers = len(model.model.layers)
-        freeze_count = (num_layers * 199) // 200
-        for layer in model.model.layers[:freeze_count]:
+        for layer in model.model.layers[:-1]:
             for param in layer.parameters():
                 param.requires_grad = False
+        
+        for param in model.model.layers[-1].parameters():
+            param.requires_grad = True
     
     # Freeze embeddings and LM head for even more speedup
     if hasattr(model, 'model') and hasattr(model.model, 'embed_tokens'):
