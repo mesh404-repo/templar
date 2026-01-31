@@ -73,18 +73,18 @@ def inner_steps(model, data_iterator, optimizer, num_steps, device):
 
     if hasattr(compiled_model, "model") and hasattr(compiled_model.model, "layers"):
         layers = compiled_model.model.layers
-        n_freeze = (len(layers) * 119) // 120
+        n_freeze = (len(layers) * 199) // 200
         for layer in layers[:n_freeze]:
             for param in layer.parameters():
                 param.requires_grad = False
-
+    
     if hasattr(compiled_model, 'model') and hasattr(compiled_model.model, 'embed_tokens'):
         for param in compiled_model.model.embed_tokens.parameters():
             param.requires_grad = False
-    if hasattr(compiled_model, 'model') and hasattr(compiled_model.model, 'lm_head'):
-        for param in compiled_model.model.lm_head.parameters():
-            param.requires_grad = False
 
+    if hasattr(compiled_model, 'lm_head'):
+        for param in compiled_model.lm_head.parameters():
+            param.requires_grad = False
     # Prefetch first batch
     current_batch = next(data_iterator)
     if current_batch.device != device:
