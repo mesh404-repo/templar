@@ -70,3 +70,4 @@ benchmark/
 
 # Test scripts (optional)
 scripts/test_chi_flow.py
+scripts/reset_leaderboard.py
