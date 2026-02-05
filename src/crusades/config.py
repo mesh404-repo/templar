@@ -39,7 +39,6 @@ class MFUConfig(BaseModel):
     """MFU (Model FLOPs Utilization) calculation settings."""
 
     gpu_peak_tflops: float = 312.0  # A100 80GB peak TFLOPS (bfloat16)
-    model_params_billions: float = 3.0  # Model size in billions of parameters
 
 
 class AdaptiveThresholdConfig(BaseModel):

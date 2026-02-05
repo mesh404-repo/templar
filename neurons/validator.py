@@ -552,7 +552,8 @@ class Validator(BaseNode):
                 await self.db.update_submission_score(submission_id, 0.0)
                 await self.db.update_submission_status(
                     submission_id,
-                    SubmissionStatus.FAILED,
+                    SubmissionStatus.FAILED_EVALUATION,
+                    error_message="All evaluations failed",
                 )
                 logger.warning(f"Submission {submission_id} FAILED: all evaluations failed")
 

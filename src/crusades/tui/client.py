@@ -320,7 +320,7 @@ class DatabaseClient:
         )
         score_24h_ago = top_24h_ago["score"] if top_24h_ago and top_24h_ago["score"] else 0.0
 
-        # Calculate improvement percentage
+        # Calculate improvement percentage (never negative)
         if score_24h_ago > 0:
             improvement = max(0, ((top_score - score_24h_ago) / score_24h_ago) * 100)
         elif top_score > 0:
@@ -510,7 +510,7 @@ class DatabaseClient:
             f"SELECT submission_id, miner_hotkey, miner_uid, status, final_score, "
             f"created_at, error_message FROM submissions s "
             f"WHERE status IN ('finished', 'failed_validation', 'failed_evaluation', "
-            f"'failed_copy', 'error'){vf} "
+            f"'error'){vf} "
             f"ORDER BY created_at DESC LIMIT 20"
         )
 
