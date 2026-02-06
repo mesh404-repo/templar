@@ -1,6 +1,6 @@
 # Templar Crusades
 
-**TPS Crusades on Bittensor** - Miners compete to optimize training code for maximum Tokens Per Second.
+**TPS Crusades on Bittensor** - Miners compete to optimize training code for maximum MFU.
 
 ## How It Works
 
@@ -26,7 +26,7 @@
 │     │                                                     5. Runs in Container   │
 │     │                                                        (X eval runs)       │
 │     │                                                              │             │
-│     │                                                     6. Calculate TPS       │
+│     │                                                     6. Calculate MFU       │
 │     │                                                        (median score)      │
 │     │                                                              │             │
 │     │                                                     7. Set weights         │
@@ -190,37 +190,9 @@ Key settings in `hparams/hparams.json`:
 
 ---
 
-## Project Structure
-
-```
-templar-crusades/
-├── neurons/
-│   ├── miner.py              # Miner CLI (submit, validate, status)
-│   └── validator.py          # Validator main loop
-├── local_test/
-│   ├── setup_benchmark.py    # Download model & data
-│   └── train.py              # Template to optimize
-├── environments/templar/
-│   ├── Dockerfile            # Evaluation container
-│   └── env.py                # Evaluation environment
-├── hparams/
-│   └── hparams.json          # Configuration
-├── docs/
-│   └── Validator.md          # Validator documentation
-└── src/crusades/
-    ├── chain/                # Blockchain interactions
-    ├── affinetes/            # Docker/Basilica evaluation
-    ├── storage/              # Database models
-    └── tui/                  # Terminal dashboard
-```
-
----
-
 ## TUI Dashboard
 
 Monitor crusades activity in real-time with the terminal dashboard.
-
-### (Connect to Public API)
 
 ```bash
 # Connect to the official Crusades API
@@ -229,8 +201,8 @@ uv run -m crusades.tui --url 69.19.137.219:8080
 
 ### Features
 
-- Leaderboard with TPS scores
+- Leaderboard with MFU scores
 - Recent submissions and their status
-- TPS history chart
+- MFU history chart
 - Validator status
 - View submission code (after evaluation)

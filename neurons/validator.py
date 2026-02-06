@@ -22,6 +22,7 @@ from typing import Literal
 import bittensor as bt
 import torch
 
+import crusades
 from crusades.affinetes import AffinetesRunner
 from crusades.chain.commitments import (
     CodeUrlInfo,
@@ -31,6 +32,7 @@ from crusades.chain.commitments import (
 from crusades.chain.weights import WeightSetter
 from crusades.config import get_config, get_hparams
 from crusades.core.protocols import SubmissionStatus
+from crusades.logging import setup_loki_logger
 from crusades.storage.database import Database, get_database
 from crusades.storage.models import EvaluationModel, SubmissionModel
 
@@ -38,8 +40,10 @@ from .base_node import BaseNode
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    format="%(asctime)s UTC | %(levelname)s | %(name)s | %(message)s",
 )
+# Force UTC for all log timestamps
+logging.Formatter.converter = time.gmtime
 logger = logging.getLogger(__name__)
 
 
@@ -78,8 +82,19 @@ class Validator(BaseNode):
 
     async def initialize(self) -> None:
         """Initialize validator components."""
+        global logger
+
         config = get_config()
         hparams = get_hparams()
+
+        # Setup Loki logging for Grafana dashboard
+        uid_str = str(self.uid) if self.uid is not None else "unknown"
+        logger = setup_loki_logger(
+            service="crusades-validator",
+            uid=uid_str,
+            version=crusades.__version__,
+            environment=config.subtensor_network or "finney",
+        )
 
         logger.info("Initializing validator (URL-Based Architecture)")
 
@@ -127,9 +142,14 @@ class Validator(BaseNode):
             model_url=hparams.benchmark_model_name,
             data_url=hparams.benchmark_dataset_name,
             timeout=hparams.eval_timeout,
-            output_tolerance=hparams.verification.output_vector_tolerance,
-            loss_ratio_min=hparams.verification.loss_ratio_min,
-            loss_ratio_max=hparams.verification.loss_ratio_max,
+            max_loss_difference=hparams.verification.max_loss_difference,
+            min_params_changed_ratio=hparams.verification.min_params_changed_ratio,
+            # Gradient verification
+            gradient_cosine_min=hparams.verification.gradient_cosine_min,
+            gradient_norm_ratio_min=hparams.verification.gradient_norm_ratio_min,
+            gradient_norm_ratio_max=hparams.verification.gradient_norm_ratio_max,
+            # MFU calculation
+            gpu_peak_tflops=hparams.mfu.gpu_peak_tflops,
             # Basilica config
             basilica_image=hparams.basilica.image,
             basilica_ttl_seconds=hparams.basilica.ttl_seconds,
@@ -251,7 +271,8 @@ class Validator(BaseNode):
     ) -> None:
         """Create a submission record from a blockchain commitment."""
         hparams = get_hparams()
-        submission_id = f"commit_{commitment.reveal_block}_{commitment.uid}"
+        version = crusades.COMPETITION_VERSION
+        submission_id = f"v{version}_commit_{commitment.reveal_block}_{commitment.uid}"
 
         try:
             existing = await self.db.get_submission(submission_id)
@@ -267,7 +288,14 @@ class Validator(BaseNode):
 
         if last_submission:
             try:
-                last_block = int(last_submission.submission_id.split("_")[1])
+                # Handle both old (commit_block_uid) and new (vN_commit_block_uid) formats
+                parts = last_submission.submission_id.split("_")
+                if parts[0].startswith("v"):
+                    # New format: v3_commit_79639_1
+                    last_block = int(parts[2])
+                else:
+                    # Old format: commit_79639_1
+                    last_block = int(parts[1])
                 blocks_since = commitment.reveal_block - last_block
 
                 if blocks_since < min_blocks:
@@ -287,6 +315,7 @@ class Validator(BaseNode):
             bucket_path=commitment.code_url_info.url,  # Store code URL
             status=SubmissionStatus.EVALUATING,
             payment_verified=True,
+            spec_version=crusades.COMPETITION_VERSION,
         )
 
         try:
@@ -380,13 +409,17 @@ class Validator(BaseNode):
     async def evaluate_submissions(self) -> None:
         """Evaluate submissions by downloading from code URL.
 
-        The code URL is stored in bucket_path field.
+        Only evaluates submissions matching current competition version.
         """
         hparams = get_hparams()
-        evaluating = await self.db.get_evaluating_submissions()
+        competition_version = crusades.COMPETITION_VERSION
+        # Only evaluate submissions from current version
+        evaluating = await self.db.get_evaluating_submissions(spec_version=competition_version)
         num_runs = hparams.evaluation_runs
 
-        logger.info(f"Found {len(evaluating)} submissions in EVALUATING status")
+        logger.info(
+            f"Found {len(evaluating)} submissions in EVALUATING status (v{competition_version})"
+        )
 
         for submission in evaluating:
             code_url = submission.bucket_path
@@ -439,13 +472,16 @@ class Validator(BaseNode):
                 )
 
                 if result.success:
-                    logger.info(f"Run {current_run} PASSED: {result.tps:,.2f} TPS")
+                    logger.info(
+                        f"Run {current_run} PASSED: MFU={result.mfu:.2f}% TPS={result.tps:,.2f}"
+                    )
                 else:
                     logger.warning(f"Run {current_run} FAILED: {result.error}")
 
                 evaluation = EvaluationModel(
                     submission_id=submission.submission_id,
                     evaluator_hotkey=self.hotkey,
+                    mfu=result.mfu,  # MFU is primary metric
                     tokens_per_second=result.tps,
                     total_tokens=result.total_tokens,
                     wall_time_seconds=result.wall_time_seconds,
@@ -466,7 +502,8 @@ class Validator(BaseNode):
             await self._finalize_submission(submission.submission_id, num_runs)
 
     async def _finalize_submission(self, submission_id: str, num_runs: int) -> None:
-        """Calculate final score and update submission status."""
+        """Calculate final score (MFU) and update submission status."""
+        hparams = get_hparams()
         num_evals = await self.db.count_evaluations(submission_id)
         required_evals = num_runs
 
@@ -476,26 +513,49 @@ class Validator(BaseNode):
             all_evals = await self.db.get_evaluations(submission_id)
             successful_evals = [e for e in all_evals if e.success]
 
+            # Check minimum success rate
+            success_rate = len(successful_evals) / len(all_evals) if all_evals else 0
+            min_success_rate = getattr(hparams, "min_success_rate", 0.5)
+
+            if success_rate < min_success_rate:
+                await self.db.update_submission_status(
+                    submission_id,
+                    SubmissionStatus.FAILED_EVALUATION,
+                    error_message=f"Success rate {success_rate:.1%} below minimum {min_success_rate:.0%}",
+                )
+                logger.warning(
+                    f"Submission {submission_id} failed: success rate {success_rate:.1%} < {min_success_rate:.0%}"
+                )
+                return
+
             if successful_evals:
-                tps_scores = [e.tokens_per_second for e in successful_evals]
+                # MFU is the primary metric now
+                mfu_scores = [e.mfu for e in successful_evals]
                 # Use median_low to always return an actual run value (not average of two)
-                median_tps = statistics.median_low(tps_scores)
+                median_mfu = statistics.median_low(mfu_scores)
 
                 logger.info(
                     f"Final score for {submission_id}:\n"
-                    f"   Successful runs: {len(tps_scores)}\n"
-                    f"   Scores: {[f'{s:.1f}' for s in sorted(tps_scores)]}\n"
-                    f"   Median TPS (low): {median_tps:,.2f}"
+                    f"   Successful runs: {len(mfu_scores)}\n"
+                    f"   MFU scores: {[f'{s:.2f}%' for s in sorted(mfu_scores)]}\n"
+                    f"   Median MFU (low): {median_mfu:.2f}%"
                 )
 
-                await self.db.update_submission_score(submission_id, median_tps)
+                await self.db.update_submission_score(submission_id, median_mfu)
+                await self.db.update_submission_status(
+                    submission_id,
+                    SubmissionStatus.FINISHED,
+                )
+                logger.info(f"Submission {submission_id} FINISHED with MFU={median_mfu:.2f}%")
             else:
+                # All evaluations failed - mark submission as failed with score 0
+                await self.db.update_submission_score(submission_id, 0.0)
                 await self.db.update_submission_status(
                     submission_id,
                     SubmissionStatus.FAILED_EVALUATION,
                     error_message="All evaluations failed",
                 )
-                logger.warning(f"Submission {submission_id} failed: no successful evaluations")
+                logger.warning(f"Submission {submission_id} FAILED: all evaluations failed")
 
     def _cleanup_memory(self):
         """Clean up GPU memory."""
@@ -523,6 +583,40 @@ class Validator(BaseNode):
                 self.commitment_reader.sync()
             self.last_sync_time = now
 
+    async def _refresh_weight_block_from_chain(self) -> None:
+        """Refresh last_weight_set_block from chain's metagraph.
+
+        This ensures we have the latest last_update from chain before
+        checking if we can set weights.
+        """
+        if self.chain is None:
+            return
+
+        try:
+            # Sync metagraph to get latest state
+            await self.chain.sync_metagraph()
+
+            if self.chain.metagraph is None:
+                return
+
+            # Find our UID in the metagraph
+            hotkey = self.chain.hotkey
+            if hotkey not in self.chain.metagraph.hotkeys:
+                return
+
+            uid = self.chain.metagraph.hotkeys.index(hotkey)
+            chain_last_update = int(self.chain.metagraph.last_update[uid])
+
+            # Update if chain shows a more recent value
+            if chain_last_update > self.last_weight_set_block:
+                logger.debug(
+                    f"Updating last_weight_set_block from chain: "
+                    f"{self.last_weight_set_block} -> {chain_last_update}"
+                )
+                self.last_weight_set_block = chain_last_update
+        except Exception as e:
+            logger.debug(f"Could not refresh weight block from chain: {e}")
+
     async def maybe_set_weights(self) -> None:
         """Set weights if enough blocks have passed since last update."""
         if self.weight_setter is None:
@@ -532,6 +626,10 @@ class Validator(BaseNode):
         if self.commitment_reader is None:
             logger.warning("Commitment reader not initialized - cannot set weights")
             return
+
+        # Sync metagraph and refresh last_weight_set_block from chain
+        # This ensures we don't attempt weight setting if chain shows recent update
+        await self._refresh_weight_block_from_chain()
 
         hparams = get_hparams()
         current_block = self.commitment_reader.get_current_block()
@@ -591,7 +689,40 @@ class Validator(BaseNode):
 
     async def _load_state(self) -> None:
         """Load persisted validator state from database."""
+        from crusades import COMPETITION_VERSION
+
+        current_version = COMPETITION_VERSION
+
         try:
+            # Check if version changed - if so, reset state for fresh competition
+            stored_version_str = await self.db.get_validator_state("competition_version")
+            stored_version = int(stored_version_str) if stored_version_str else 0
+
+            if stored_version != current_version:
+                # Get current block to start fresh from NOW (ignore old commitments)
+                try:
+                    current_block = self.chain.subtensor.get_current_block()
+                except Exception as e:
+                    # Cannot determine current block - defer version reset to avoid
+                    # reprocessing all historical commitments from block 0
+                    logger.warning(
+                        f"Competition version changed ({stored_version} -> {current_version}), "
+                        f"but cannot get current block: {e}. Deferring reset until chain is available."
+                    )
+                    return
+
+                logger.info(
+                    f"Competition version changed ({stored_version} -> {current_version}), "
+                    f"starting fresh from block {current_block}"
+                )
+                # Keep last_processed_block at current block (ignore old commitments)
+                self.last_processed_block = current_block
+                # Clear evaluated URLs (allow same URLs in new version)
+                self.evaluated_code_urls = {}
+                # Save new version
+                await self.db.set_validator_state("competition_version", str(current_version))
+                return
+
             # Load last processed block
             block_str = await self.db.get_validator_state("last_processed_block")
             if block_str:
@@ -619,7 +750,12 @@ class Validator(BaseNode):
 
     async def _save_state(self) -> None:
         """Persist validator state to database."""
+        from crusades import COMPETITION_VERSION
+
         try:
+            await self.db.set_validator_state(
+                "competition_version", str(COMPETITION_VERSION)
+            )
             await self.db.set_validator_state(
                 "last_processed_block", str(self.last_processed_block)
             )

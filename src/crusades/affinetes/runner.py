@@ -29,6 +29,8 @@ from typing import Literal
 
 import httpx
 
+from crusades.core.exceptions import EvaluationErrorCode
+
 # Optional: Basilica SDK for cloud GPU evaluation
 try:
     from basilica import BasilicaClient
@@ -50,10 +52,12 @@ class EvaluationResult:
     """Result from evaluating a miner's submission."""
 
     success: bool
-    tps: float = 0.0
+    mfu: float = 0.0  # Model FLOPs Utilization (primary metric)
+    tps: float = 0.0  # Tokens per second (secondary metric)
     total_tokens: int = 0
     wall_time_seconds: float = 0.0
     error: str | None = None
+    error_code: str | None = None  # Structured error code for reliable error handling
     seed: str = ""
     task_id: int = 0
     diagnostics: dict = field(default_factory=dict)
@@ -64,10 +68,12 @@ class EvaluationResult:
         """Create from dictionary response."""
         return cls(
             success=data.get("success", False),
+            mfu=float(data.get("mfu", 0.0)),
             tps=float(data.get("tps", 0.0)),
             total_tokens=int(data.get("total_tokens", 0)),
             wall_time_seconds=float(data.get("wall_time_seconds", 0.0)),
             error=data.get("error"),
+            error_code=data.get("error_code"),
             seed=str(data.get("seed", "")),
             task_id=int(data.get("task_id", 0)),
             diagnostics=data.get("diagnostics", {}),
@@ -75,9 +81,33 @@ class EvaluationResult:
         )
 
     @classmethod
-    def failure(cls, error: str, task_id: int = 0) -> "EvaluationResult":
+    def failure(
+        cls, error: str, task_id: int = 0, error_code: str | None = None
+    ) -> "EvaluationResult":
         """Create a failure result."""
-        return cls(success=False, error=error, task_id=task_id)
+        return cls(success=False, error=error, error_code=error_code, task_id=task_id)
+
+    def is_verification_failure(self) -> bool:
+        """Check if this result failed due to verification/anti-cheat checks."""
+        if not self.error_code:
+            return False
+        try:
+            code = EvaluationErrorCode(self.error_code)
+            return EvaluationErrorCode.is_verification_failure(code)
+        except ValueError:
+            return False
+
+    def is_miner_fault(self) -> bool:
+        """Check if the error is likely the miner's fault."""
+        if self.success:
+            return False
+        if not self.error_code:
+            return True  # Assume miner fault if no code
+        try:
+            code = EvaluationErrorCode(self.error_code)
+            return EvaluationErrorCode.is_miner_fault(code)
+        except ValueError:
+            return True
 
 
 class AffinetesRunner:
@@ -117,9 +147,15 @@ class AffinetesRunner:
         timeout: int = 600,
         model_url: str | None = None,
         data_url: str | None = None,
-        output_tolerance: float = 0.02,
-        loss_ratio_min: float = 0.8,
-        loss_ratio_max: float = 1.2,
+        # Verification settings
+        max_loss_difference: float = 0.5,
+        min_params_changed_ratio: float = 0.5,
+        # Gradient verification
+        gradient_cosine_min: float = 0.8,
+        gradient_norm_ratio_min: float = 0.5,
+        gradient_norm_ratio_max: float = 2.0,
+        # MFU calculation
+        gpu_peak_tflops: float = 312.0,
         validator_image: str | None = None,
         # Basilica-specific settings
         basilica_image: str | None = None,
@@ -142,9 +178,12 @@ class AffinetesRunner:
             timeout: Evaluation timeout in seconds
             model_url: Default model URL (HuggingFace model ID)
             data_url: Default data URL (HuggingFace dataset)
-            output_tolerance: Verification tolerance (0.02 = 2%)
-            loss_ratio_min: Minimum allowed loss ratio (default 0.8)
-            loss_ratio_max: Maximum allowed loss ratio (default 1.2)
+            max_loss_difference: Max allowed |candidate_loss - reference_loss|
+            min_params_changed_ratio: Min % params that must change
+            gradient_cosine_min: Min gradient cosine similarity
+            gradient_norm_ratio_min: Min gradient norm ratio
+            gradient_norm_ratio_max: Max gradient norm ratio
+            gpu_peak_tflops: GPU peak TFLOPS for MFU calculation
             validator_image: Docker image for local evaluation
             basilica_image: Docker image for Basilica (must be in registry)
             basilica_ttl_seconds: TTL for Basilica deployment (default 1 hour)
@@ -163,9 +202,15 @@ class AffinetesRunner:
         self.timeout = timeout
         self.default_model_url = model_url
         self.default_data_url = data_url
-        self.output_tolerance = output_tolerance
-        self.loss_ratio_min = loss_ratio_min
-        self.loss_ratio_max = loss_ratio_max
+        # Verification settings
+        self.max_loss_difference = max_loss_difference
+        self.min_params_changed_ratio = min_params_changed_ratio
+        # Gradient verification
+        self.gradient_cosine_min = gradient_cosine_min
+        self.gradient_norm_ratio_min = gradient_norm_ratio_min
+        self.gradient_norm_ratio_max = gradient_norm_ratio_max
+        # MFU calculation
+        self.gpu_peak_tflops = gpu_peak_tflops
         self.validator_image = validator_image or self.DEFAULT_DOCKER_IMAGE
         self.basilica_image = basilica_image or self.DEFAULT_BASILICA_IMAGE
         self.basilica_ttl_seconds = basilica_ttl_seconds
@@ -327,9 +372,16 @@ async def main():
         data_samples={data_samples},
         timeout={self.timeout},
         code=code,
-        output_tolerance={self.output_tolerance},
-        loss_ratio_min={self.loss_ratio_min},
-        loss_ratio_max={self.loss_ratio_max},
+        max_loss_difference={self.max_loss_difference},
+        use_random_init=True,
+        min_trainable_params_ratio=1.0,
+        min_params_changed_ratio={self.min_params_changed_ratio},
+        # Gradient verification
+        gradient_cosine_min={self.gradient_cosine_min},
+        gradient_norm_ratio_min={self.gradient_norm_ratio_min},
+        gradient_norm_ratio_max={self.gradient_norm_ratio_max},
+        # MFU calculation
+        gpu_peak_tflops={self.gpu_peak_tflops},
     )
     print("EVAL_RESULT:" + json.dumps(result))
 
@@ -399,18 +451,13 @@ asyncio.run(main())
                     # PyTorch with OpenMP needs many threads, 1024 is reasonable
                     "--pids-limit",
                     "1024",
-                    # Writable /tmp for temporary files (limited size)
+                    # Writable /tmp for temporary files (exec needed for torch.compile)
                     "--tmpfs",
-                    "/tmp:rw,noexec,nosuid,size=4g",
+                    "/tmp:rw,exec,nosuid,size=4g",
+                    # Writable Triton cache for torch.compile kernels (exec needed for .so files)
+                    "--tmpfs",
+                    "/home/appuser/.triton:rw,exec,size=2g",
                     # NOTE: Don't mount tmpfs on ~/.cache/huggingface - model is pre-cached there!
-                ]
-            )
-
-            # Environment variables
-            docker_cmd.extend(
-                [
-                    "-e",
-                    f"OUTPUT_VECTOR_TOLERANCE={self.output_tolerance}",
                 ]
             )
 
@@ -645,9 +692,16 @@ asyncio.run(main())
                 "sequence_length": sequence_length,
                 "data_samples": data_samples,
                 "code": code,
-                "output_tolerance": self.output_tolerance,
-                "loss_ratio_min": self.loss_ratio_min,
-                "loss_ratio_max": self.loss_ratio_max,
+                "max_loss_difference": self.max_loss_difference,
+                "use_random_init": True,
+                "min_trainable_params_ratio": 1.0,
+                "min_params_changed_ratio": self.min_params_changed_ratio,
+                # Gradient verification
+                "gradient_cosine_min": self.gradient_cosine_min,
+                "gradient_norm_ratio_min": self.gradient_norm_ratio_min,
+                "gradient_norm_ratio_max": self.gradient_norm_ratio_max,
+                # MFU calculation
+                "gpu_peak_tflops": self.gpu_peak_tflops,
             }
 
             logger.info("[BASILICA] Sending evaluation request...")
@@ -682,6 +736,7 @@ asyncio.run(main())
                 logger.info("=" * 60)
                 logger.info("[BASILICA] Evaluation complete!")
                 logger.info(f"   Success: {result.success}")
+                logger.info(f"   MFU: {result.mfu:.2f}%")
                 logger.info(f"   TPS: {result.tps:,.2f} tokens/second")
                 logger.info(f"   Total tokens: {result.total_tokens:,}")
                 logger.info(f"   Wall time: {result.wall_time_seconds:.2f}s")

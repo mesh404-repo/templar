@@ -6,6 +6,7 @@
     "evaluation_runs": 5,
     "eval_steps": 5,
     "eval_timeout": 600,
+    "min_success_rate": 0.5,
 
     "benchmark_model_name": "Qwen/Qwen2.5-3B",
     "benchmark_dataset_name": "HuggingFaceFW/fineweb",
@@ -16,15 +17,14 @@
     "benchmark_batch_size": 4,
 
     "set_weights_interval_blocks": 100,
-
     "reveal_blocks": 100,
     "min_blocks_between_commits": 300,
     "block_time": 12,
 
     "docker": {
-        "gpu_devices": "0,1",
-        "memory_limit": "64g",
-        "shm_size": "16g"
+        "gpu_devices": "0",
+        "memory_limit": "80g",
+        "shm_size": "32g"
     },
 
     "basilica": {
@@ -32,15 +32,26 @@
         "ttl_seconds": 3600,
         "gpu_count": 1,
         "gpu_models": ["A100"],
-        "min_gpu_memory_gb": 40,
+        "min_gpu_memory_gb": 64,
         "cpu": "4",
         "memory": "32Gi"
     },
 
     "verification": {
-        "output_vector_tolerance": 0.05,
-        "loss_ratio_min": 0.8,
-        "loss_ratio_max": 1.2,
-        "deterministic_mode": true
+        "max_loss_difference": 0.3,
+        "min_params_changed_ratio": 0.8,
+        "gradient_cosine_min": 0.95,
+        "gradient_norm_ratio_min": 0.9,
+        "gradient_norm_ratio_max": 1.1
+    },
+
+    "mfu": {
+        "gpu_peak_tflops": 312.0
+    },
+
+    "adaptive_threshold": {
+        "base_threshold": 0.01,
+        "decay_percent": 0.05,
+        "decay_interval_blocks": 100
     }
 }

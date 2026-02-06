@@ -10,6 +10,9 @@ Usage:
 
     # Save code to file
     uv run scripts/view_submission.py commit_9303_1 --save
+
+    # Filter by spec_version
+    uv run scripts/view_submission.py --version 2
 """
 
 import argparse
@@ -18,37 +21,44 @@ import sys
 from pathlib import Path
 
 
-def list_submissions(db_path: str):
+def list_submissions(db_path: str, spec_version: int | None = None):
     """List all submissions in the database."""
     conn = sqlite3.connect(db_path)
     try:
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
 
-        cur.execute("""
-            SELECT submission_id, miner_uid, status, final_score, created_at,
+        query = """
+            SELECT submission_id, miner_uid, spec_version, status, final_score, created_at,
                    LENGTH(code_content) as code_len
             FROM submissions
-            ORDER BY created_at DESC
-        """)
+        """
+        params = ()
+        if spec_version is not None:
+            query += " WHERE spec_version = ?"
+            params = (spec_version,)
+        query += " ORDER BY created_at DESC"
+
+        cur.execute(query, params)
         rows = cur.fetchall()
 
         if not rows:
             print("No submissions found.")
             return
 
-        print("=" * 80)
+        print("=" * 90)
         print(
-            f"{'SUBMISSION':<20} {'UID':<5} {'STATUS':<10} {'TPS':<12} {'CODE':<10} {'SUBMITTED'}"
+            f"{'SUBMISSION':<25} {'UID':<5} {'VER':<4} {'STATUS':<10} {'MFU':<10} {'CODE':<10} {'SUBMITTED'}"
         )
-        print("=" * 80)
+        print("=" * 90)
 
         for r in rows:
-            tps = f"{r['final_score']:.2f}" if r["final_score"] else "N/A"
-            code = f"{r['code_len']} bytes" if r["code_len"] else "N/A"
+            mfu = f"{r['final_score']:.2f}%" if r["final_score"] else "N/A"
+            code = f"{r['code_len']}b" if r["code_len"] else "N/A"
             created = r["created_at"][:19] if r["created_at"] else "N/A"
             print(
-                f"{r['submission_id']:<20} {r['miner_uid']:<5} {r['status']:<10} {tps:<12} {code:<10} {created}"
+                f"{r['submission_id']:<25} {r['miner_uid']:<5} {r['spec_version']:<4} "
+                f"{r['status']:<10} {mfu:<10} {code:<10} {created}"
             )
     finally:
         conn.close()
@@ -63,7 +73,7 @@ def view_submission(db_path: str, submission_id: str, save: bool = False):
 
         cur.execute(
             """
-            SELECT submission_id, miner_uid, miner_hotkey, status, final_score,
+            SELECT submission_id, miner_uid, miner_hotkey, spec_version, status, final_score,
                    code_hash, created_at, code_content
             FROM submissions
             WHERE submission_id = ?
@@ -83,11 +93,40 @@ def view_submission(db_path: str, submission_id: str, save: bool = False):
         print("=" * 70)
         print(f"UID:        {row['miner_uid']}")
         print(f"Hotkey:     {row['miner_hotkey']}")
+        print(f"Version:    {row['spec_version']}")
         print(f"Status:     {row['status']}")
         if row["final_score"]:
-            print(f"Score:      {row['final_score']:.2f} TPS")
+            print(f"MFU:        {row['final_score']:.2f}%")
         print(f"Code URL:   {row['code_hash']}")
         print(f"Submitted:  {row['created_at']}")
+
+        # Get evaluations for this submission
+        cur.execute(
+            """
+            SELECT evaluation_id, mfu, tokens_per_second, total_tokens, 
+                   wall_time_seconds, success, error, created_at
+            FROM evaluations
+            WHERE submission_id = ?
+            ORDER BY created_at
+        """,
+            (submission_id,),
+        )
+        evals = cur.fetchall()
+
+        if evals:
+            print()
+            print("-" * 70)
+            print("EVALUATIONS:")
+            print("-" * 70)
+            for i, e in enumerate(evals, 1):
+                status = "PASS" if e["success"] else "FAIL"
+                print(
+                    f"  #{i}: MFU={e['mfu']:.2f}% TPS={e['tokens_per_second']:.0f} "
+                    f"tokens={e['total_tokens']} time={e['wall_time_seconds']:.2f}s [{status}]"
+                )
+                if e["error"]:
+                    print(f"      Error: {e['error'][:60]}...")
+
         print()
 
         if row["code_content"]:
@@ -96,7 +135,7 @@ def view_submission(db_path: str, submission_id: str, save: bool = False):
                 filename = f"{submission_id}_train.py"
                 with open(filename, "w") as f:
                     f.write(row["code_content"])
-                print(f"✓ Code saved to: {filename}")
+                print(f"Code saved to: {filename}")
             else:
                 print("=" * 70)
                 print("CODE CONTENT:")
@@ -119,6 +158,9 @@ Examples:
   # List all submissions
   uv run scripts/view_submission.py
 
+  # List submissions for spec_version 2
+  uv run scripts/view_submission.py --version 2
+
   # View specific submission
   uv run scripts/view_submission.py commit_9303_1
 
@@ -129,6 +171,9 @@ Examples:
     parser.add_argument("submission_id", nargs="?", help="Submission ID to view")
     parser.add_argument("--save", action="store_true", help="Save code to file")
     parser.add_argument("--db", default="crusades.db", help="Database path")
+    parser.add_argument(
+        "--version", "-v", type=int, help="Filter by spec_version (competition version)"
+    )
 
     args = parser.parse_args()
 
@@ -146,7 +191,7 @@ Examples:
     if args.submission_id:
         view_submission(db_path, args.submission_id, args.save)
     else:
-        list_submissions(db_path)
+        list_submissions(db_path, args.version)
 
 
 if __name__ == "__main__":

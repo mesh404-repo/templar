@@ -26,12 +26,32 @@ class StorageConfig(BaseModel):
 
 
 class VerificationConfig(BaseModel):
-    """Verification tolerance settings."""
+    """Verification settings using gradient-based checks."""
 
-    output_vector_tolerance: float = 0.02  # 2% aggregate difference allowed
-    loss_ratio_min: float = 0.8  # Minimum allowed loss ratio (candidate/reference)
-    loss_ratio_max: float = 1.2  # Maximum allowed loss ratio (candidate/reference)
-    deterministic_mode: bool = True
+    max_loss_difference: float = 0.5
+    min_params_changed_ratio: float = 0.8
+    gradient_cosine_min: float = 0.8
+    gradient_norm_ratio_min: float = 0.5
+    gradient_norm_ratio_max: float = 2.0
+
+
+class MFUConfig(BaseModel):
+    """MFU (Model FLOPs Utilization) calculation settings."""
+
+    gpu_peak_tflops: float = 312.0  # A100 80GB peak TFLOPS (bfloat16)
+
+
+class AdaptiveThresholdConfig(BaseModel):
+    """Adaptive decay threshold for leaderboard replacement.
+
+    Instead of a fixed 1% threshold, we use an adaptive threshold that:
+    - Sets threshold = improvement when new leader wins
+    - Decays over time towards base_threshold (loses decay_percent each interval)
+    """
+
+    base_threshold: float = 0.01  # Minimum threshold (1%)
+    decay_percent: float = 0.05  # Percent to lose per interval (5% = loses 5% of excess)
+    decay_interval_blocks: int = 100  # Blocks between decay steps (~20 min)
 
 
 class DockerConfig(BaseModel):
@@ -81,6 +101,10 @@ class HParams(BaseModel):
     - Miners host train.py at any URL and commit the URL to blockchain
     - Validators download from miner's URL and evaluate via Docker/Basilica
     - All settings are defined in hparams.json (no hardcoded defaults)
+
+    Versioning:
+    - Competition version is derived from __version__ major number
+    - Use crusades.COMPETITION_VERSION to get the current competition version
     """
 
     # Network settings
@@ -94,6 +118,7 @@ class HParams(BaseModel):
     evaluation_runs: int
     eval_steps: int
     eval_timeout: int
+    min_success_rate: float = 0.5  # Minimum success rate for submissions
 
     # Benchmark settings
     benchmark_model_name: str
@@ -120,6 +145,12 @@ class HParams(BaseModel):
 
     # Verification (nested config with defaults from JSON)
     verification: VerificationConfig = Field(default_factory=VerificationConfig)
+
+    # MFU calculation settings
+    mfu: MFUConfig = Field(default_factory=MFUConfig)
+
+    # Adaptive threshold for leaderboard
+    adaptive_threshold: AdaptiveThresholdConfig = Field(default_factory=AdaptiveThresholdConfig)
 
     # Storage (for evaluation records - not in hparams.json)
     storage: StorageConfig = Field(default_factory=StorageConfig)

@@ -41,6 +41,8 @@ dependencies = [
     "substrateinterface>=1.0.0",
     "substrate-interface>=1.8.1",
     "basilica-sdk>=0.13.0",  # Basilica cloud GPU SDK
+    "python-logging-loki>=0.3.1",
+    "aiohttp>=3.13.2",
 ]
 
 [project.optional-dependencies]

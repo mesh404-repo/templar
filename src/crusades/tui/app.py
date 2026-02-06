@@ -12,6 +12,7 @@ from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 
+from crusades import COMPETITION_VERSION
 from crusades.tui.client import (
     CrusadesClient,
     CrusadesData,
@@ -25,28 +26,28 @@ console = Console(force_terminal=True)
 
 
 def create_chart(history: list[dict], width: int = 50, height: int = 8) -> Text:
-    """Create an ASCII LINE chart of TPS over time."""
+    """Create an ASCII LINE chart of MFU over time."""
     if not history:
         return Text("No data available", style="dim italic", justify="center")
 
-    # Sort by timestamp and get TPS values
+    # Sort by timestamp and get MFU values (fallback to tps for backwards compat)
     sorted_history = sorted(history, key=lambda x: x.get("timestamp", ""))
-    tps_values = [h.get("tps", 0) for h in sorted_history]
+    mfu_values = [h.get("mfu", h.get("tps", 0)) for h in sorted_history]
 
-    if not tps_values:
+    if not mfu_values:
         return Text("No data available", style="dim italic", justify="center")
 
-    min_tps = min(tps_values)
-    max_tps = max(tps_values)
+    min_mfu = min(mfu_values)
+    max_mfu = max(mfu_values)
 
     # Add padding to min/max for better visualization
-    if max_tps == min_tps:
+    if max_mfu == min_mfu:
         # All values same - show horizontal line in middle
-        padding = max_tps * 0.1 if max_tps > 0 else 100
-        min_tps = max_tps - padding
-        max_tps = max_tps + padding
+        padding = max_mfu * 0.1 if max_mfu > 0 else 100
+        min_mfu = max_mfu - padding
+        max_mfu = max_mfu + padding
 
-    tps_range = max_tps - min_tps
+    mfu_range = max_mfu - min_mfu
 
     # Chart dimensions
     chart_width = width - 7  # Account for y-axis label
@@ -55,23 +56,23 @@ def create_chart(history: list[dict], width: int = 50, height: int = 8) -> Text:
     grid = [[" " for _ in range(chart_width)] for _ in range(height)]
 
     # Calculate positions for each data point
-    if len(tps_values) == 1:
+    if len(mfu_values) == 1:
         # Single point - show in middle
         x_positions = [chart_width // 2]
     else:
         x_positions = [
-            int(i * (chart_width - 1) / (len(tps_values) - 1)) for i in range(len(tps_values))
+            int(i * (chart_width - 1) / (len(mfu_values) - 1)) for i in range(len(mfu_values))
         ]
 
     y_positions = []
-    for tps in tps_values:
-        normalized = (tps - min_tps) / tps_range
+    for mfu in mfu_values:
+        normalized = (mfu - min_mfu) / mfu_range
         y = int(normalized * (height - 1))
         y = max(0, min(height - 1, y))
         y_positions.append(y)
 
     # Draw connecting lines between points
-    for i in range(len(tps_values) - 1):
+    for i in range(len(mfu_values) - 1):
         x1, y1 = x_positions[i], y_positions[i]
         x2, y2 = x_positions[i + 1], y_positions[i + 1]
 
@@ -98,18 +99,18 @@ def create_chart(history: list[dict], width: int = 50, height: int = 8) -> Text:
         if 0 <= x < chart_width and 0 <= y < height:
             grid[height - 1 - y][x] = "●"
 
-    # Build output lines with y-axis labels
+    # Build output lines with y-axis labels (MFU shown as percentage)
     lines = []
     for row in range(height):
         if row == 0:
-            label = f"{int(max_tps):>5} │"
+            label = f"{max_mfu:>4.1f}% │"
         elif row == height - 1:
-            label = f"{int(min_tps):>5} │"
+            label = f"{min_mfu:>4.1f}% │"
         elif row == height // 2:
-            mid_val = int(min_tps + tps_range / 2)
-            label = f"{mid_val:>5} │"
+            mid_val = min_mfu + mfu_range / 2
+            label = f"{mid_val:>4.1f}% │"
         else:
-            label = "      │"
+            label = "       │"
         lines.append(label + "".join(grid[row]))
 
     # X-axis
@@ -149,12 +150,12 @@ def create_chart(history: list[dict], width: int = 50, height: int = 8) -> Text:
 
 
 def create_chart_panel(data: CrusadesData) -> Panel:
-    """Create the TPS history chart panel."""
+    """Create the MFU history chart panel."""
     # Use full width - get console width dynamically
     chart = create_chart(data.history, width=90, height=6)
     return Panel(
         chart,
-        title="[bold]TPS History[/bold]",
+        title="[bold]MFU History[/bold]",
         border_style="yellow",
     )
 
@@ -162,16 +163,25 @@ def create_chart_panel(data: CrusadesData) -> Panel:
 def create_stats_panel(data: CrusadesData) -> Panel:
     """Create the stats overview panel."""
     overview = data.overview
+    threshold = data.threshold or {}
 
     stats = Table.grid(padding=(0, 4))
     stats.add_column(justify="center")
     stats.add_column(justify="center")
     stats.add_column(justify="center")
     stats.add_column(justify="center")
+    stats.add_column(justify="center")
+
+    # Calculate MFU to Beat: top_mfu * (1 + threshold)
+    # Handle None values to avoid math errors
+    top_mfu = overview.get("current_top_score") or 0
+    threshold_val = threshold.get("decayed_threshold") or 0.01
+    mfu_to_beat = top_mfu * (1 + threshold_val) if top_mfu > 0 else 0
 
     stats.add_row(
         Text(f"24h Submissions\n{overview.get('submissions_24h', 0)}", justify="center"),
-        Text(f"Top TPS\n{overview.get('current_top_score', 0):.1f}", justify="center"),
+        Text(f"Top MFU\n{top_mfu:.1f}%", justify="center"),
+        Text(f"MFU to Beat\n{mfu_to_beat:.1f}%", justify="center"),
         Text(f"Active Miners\n{overview.get('active_miners', 0)}", justify="center"),
         Text(f"Total\n{overview.get('total_submissions', 0)}", justify="center"),
     )
@@ -238,7 +248,7 @@ def create_leaderboard_table(
     table.add_column("#", justify="right", width=3)
     table.add_column("Rank", justify="right", width=5)
     table.add_column("UID", justify="right", width=6)
-    table.add_column("TPS", justify="right", style="green", width=10)
+    table.add_column("MFU", justify="right", style="green", width=10)
     table.add_column("Evals", justify="right", width=6)
     table.add_column("Submitted", justify="right", width=10)
 
@@ -284,7 +294,7 @@ def create_recent_table(
     table.add_column("#", justify="right", width=3)
     table.add_column("UID", justify="right", width=6)
     table.add_column("Status", justify="left", width=16)
-    table.add_column("TPS", justify="right", width=10)
+    table.add_column("MFU", justify="right", width=10)
     table.add_column("Submitted", justify="right", width=10)
 
     status_colors = {
@@ -427,7 +437,7 @@ def create_submission_header(detail: SubmissionDetail) -> Panel:
     grid.add_row(
         f"[bold]UID:[/] {sub.get('miner_uid', 'N/A')}",
         f"[bold]Status:[/] [{status_color}]{status}[/{status_color}]",
-        f"[bold]TPS:[/] [green]{score_display}[/green]",
+        f"[bold]MFU:[/] [green]{score_display}%[/green]",
         f"[bold]Submitted:[/] {format_time_ago(sub.get('created_at'))}",
     )
     grid.add_row(
@@ -448,18 +458,20 @@ def create_evaluations_table(detail: SubmissionDetail) -> Panel:
     """Create the evaluations table."""
     table = Table(expand=True, box=None)
     table.add_column("#", justify="right", width=4)
-    table.add_column("TPS", justify="right", style="green", width=12)
-    table.add_column("Tokens", justify="right", width=12)
-    table.add_column("Wall Time", justify="right", width=12)
-    table.add_column("Status", justify="center", width=8)
-    table.add_column("Time", justify="right", width=12)
+    table.add_column("MFU", justify="right", style="green", width=10)
+    table.add_column("TPS", justify="right", width=10)
+    table.add_column("Tokens", justify="right", width=10)
+    table.add_column("Wall Time", justify="right", width=10)
+    table.add_column("Status", justify="center", width=6)
+    table.add_column("Time", justify="right", width=10)
 
-    total_tps = 0.0
+    total_mfu = 0.0
     count = 0
 
     for idx, eval_data in enumerate(detail.evaluations, 1):
+        mfu = eval_data.get("mfu", 0)
         tps = eval_data.get("tokens_per_second", 0)
-        total_tps += tps
+        total_mfu += mfu
         count += 1
 
         success = eval_data.get("success", False)
@@ -467,7 +479,8 @@ def create_evaluations_table(detail: SubmissionDetail) -> Panel:
 
         table.add_row(
             str(idx),
-            f"{tps:.2f}",
+            f"{mfu:.2f}%" if mfu else "-",
+            f"{tps:.0f}",
             str(eval_data.get("total_tokens", 0)),
             f"{eval_data.get('wall_time_seconds', 0):.2f}s",
             status_display,
@@ -475,10 +488,10 @@ def create_evaluations_table(detail: SubmissionDetail) -> Panel:
         )
 
     if not detail.evaluations:
-        table.add_row("-", "-", "-", "-", "-", "-")
+        table.add_row("-", "-", "-", "-", "-", "-", "-")
 
-    avg_tps = total_tps / count if count > 0 else 0
-    title = f"[bold]Evaluations[/bold] (Avg TPS: [green]{avg_tps:.2f}[/green])"
+    avg_mfu = total_mfu / count if count > 0 else 0
+    title = f"[bold]Evaluations[/bold] (Avg MFU: [green]{avg_mfu:.2f}%[/green])"
 
     return Panel(table, title=title, border_style="cyan")
 
@@ -597,23 +610,25 @@ def run_tui(base_url: str, refresh_interval: int, demo: bool = False, db_path: s
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
 
-    # Select client based on mode
+    # Select client based on mode (filter by competition version)
+    competition_version = COMPETITION_VERSION
+
     if demo:
         client_class = MockClient
-        client_args = ()
+        client_kwargs = {}
     elif db_path:
         client_class = DatabaseClient
-        client_args = (db_path,)
+        client_kwargs = {"db_path": db_path, "spec_version": competition_version}
     else:
         client_class = CrusadesClient
-        client_args = (base_url,)
+        client_kwargs = {"base_url": base_url}
 
     # Hide cursor and set up alternate screen buffer
     print("\033[?25l", end="", flush=True)  # Hide cursor
     print("\033[?1049h", end="", flush=True)  # Use alternate screen buffer
 
     try:
-        with client_class(*client_args) as client:
+        with client_class(**client_kwargs) as client:
             # State
             data = client.fetch_all()
             current_view = "dashboard"
