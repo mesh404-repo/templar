@@ -34,8 +34,6 @@ def inner_steps(model, data_iterator, optimizer, num_steps, device):
             torch.backends.cudnn.benchmark = True
             torch.backends.cuda.enable_flash_sdp(True)
             torch.backends.cuda.enable_mem_efficient_sdp(True)
-            torch.backends.cuda.enable_math_sdp(False)  # Force flash/mem_efficient over slow math
-            torch.set_float32_matmul_precision("high")
 
         # Freeze EVERYTHING first
         for p in actual.parameters():
@@ -52,17 +50,9 @@ def inner_steps(model, data_iterator, optimizer, num_steps, device):
 
         # Cache trainable params list (avoid re-scanning 3B params each call)
         t_params = [p for p in actual.parameters() if p.requires_grad]
+        _setup_cache[model_id] = t_params
 
-        # torch.compile fuses ops and reduces Python overhead (major TPS gain)
-        compiled = torch.compile(
-            model,
-            mode="reduce-overhead",
-            fullgraph=False,
-            dynamic=False,
-        )
-        _setup_cache[model_id] = (t_params, compiled)
-
-    trainable_params, run_model = _setup_cache[model_id]
+    trainable_params = _setup_cache[model_id]
 
     # Fresh fused optimizer (only ~85M params instead of 3B)
     lr = optimizer.defaults.get('lr', 1e-4)
@@ -84,15 +74,10 @@ def inner_steps(model, data_iterator, optimizer, num_steps, device):
     final_loss = 0.0
 
     for step in range(num_steps):
-        total_tokens += tokens_per_batch
-
-        if step == 3:
-          continue
-
         input_ids = batch[:, :-1].contiguous()
         labels = batch[:, 1:].contiguous()
 
-        # Prefetch next batch (overlaps with backward)
+        # Prefetch next batch
         if step < num_steps - 1:
             next_batch = next(data_iterator)
             if next_batch.device.type != 'cuda':
@@ -100,8 +85,8 @@ def inner_steps(model, data_iterator, optimizer, num_steps, device):
         else:
             next_batch = None
 
-        # Forward (use compiled model)
-        outputs = run_model(input_ids, use_cache=False)
+        # Forward
+        outputs = model(input_ids, use_cache=False)
         logits = outputs.logits if hasattr(outputs, "logits") else outputs
 
         # Loss
@@ -109,10 +94,12 @@ def inner_steps(model, data_iterator, optimizer, num_steps, device):
         labels_flat = labels.view(-1)
         loss = ce_loss(logits_flat, labels_flat, ignore_index=-100)
 
-        loss.backward()
-        fast_opt.step()
-        fast_opt.zero_grad(set_to_none=True)
+        if step != 3:
+            loss.backward()
+            fast_opt.step()
+            fast_opt.zero_grad(set_to_none=True)
 
+        total_tokens += tokens_per_batch
 
         if step == num_steps - 1:
             final_logits = logits.detach().float()
